@@ -279,8 +279,13 @@ function renderModal(container: HTMLElement, state: SimulationState, selectedWea
                     <span class="rarity-type">${categoryMap[upgrade.category]}</span>
                   </div>
                   <h3>${upgrade.title}</h3>
-                  <p>${upgrade.description}</p>
-                  <div class="tag-row">${upgrade.tags.map((tag) => `<span class="tag">${tag}</span>`).join("")}</div>
+                  <p>${describeUpgrade(upgrade.id)}</p>
+                  <div class="tag-row">${[
+                    ...upgrade.tags,
+                    ...(upgrade.once ? ["单局唯一"] : [])
+                  ]
+                    .map((tag) => `<span class="tag">${tag}</span>`)
+                    .join("")}</div>
                   <footer class="label">${upgrade.archetype}</footer>
                 </button>
               `;
@@ -490,6 +495,43 @@ function renderSummary(summary: NonNullable<SimulationState["meta"]["lastRunSumm
       <div class="panel"><span class="label">带回积分</span><div class="value">${summary.shardsBanked}</div></div>
     </div>
   `;
+}
+
+function describeUpgrade(upgradeId: keyof typeof upgradeDefinitions): string {
+  const repeatable = upgradeDefinitions[upgradeId].once ? "单局只能选一次。" : "可重复获取。";
+
+  const descriptions: Record<keyof typeof upgradeDefinitions, string> = {
+    "weapon-tuning": `当前武器等级 +1。每级提高伤害、射速和弹速。${repeatable}`,
+    "overclock-rounds": `伤害 +18%。${repeatable}`,
+    "heat-sink": `射速 +8%，弹速 +5%。${repeatable}`,
+    "kinetic-echo": `子弹额外穿透 1 个敌人。${repeatable}`,
+    "phase-cooling": `最大护盾 +20，并立刻恢复 20 点护盾。${repeatable}`,
+    "ion-shell": `受到的伤害降低 12%。${repeatable}`,
+    "rapid-cycle": `射速 +20%。${repeatable}`,
+    "blink-drive": `冲刺冷却缩短 18%，冲刺距离 +26。${repeatable}`,
+    "repulsor-fins": `移动速度 +12%，碎片吸附范围 +34。${repeatable}`,
+    "salvage-net": `经验获取 +20%。${repeatable}`,
+    "compound-interest": `局内收益倍率 +18%。${repeatable}`,
+    "pressure-core": `撤离阶段解锁后，额外伤害倍率提高。${repeatable}`,
+    "auto-forge": `选择后立刻恢复 12 点护盾。${repeatable}`,
+    "lattice-armor": `最大生命 +28，并立刻恢复 28 点生命。${repeatable}`,
+    "fracture-grid": `强化危险区域联动伤害。更适合围绕地形和红圈作战。${repeatable}`,
+    "weapon-swap": `把当前武器切换为电弧发射器。${repeatable}`,
+    "twin-fang": `额外 +1 发并列子弹。${repeatable}`,
+    triptych: `最少变为三联发，但射速降低 8%。${repeatable}`,
+    "rear-array": `身后追加一发自动副炮。${repeatable}`,
+    "catacomb-rounds": `子弹额外获得 1 次弹射。${repeatable}`,
+    "halo-shards": `击杀敌人时额外释放一圈裂片弹。${repeatable}`,
+    "seeker-lens": `子弹获得追踪修正，追踪强度 +0.08。${repeatable}`,
+    "giant-core": `弹体尺寸 +32%，伤害 +8%，弹速 -8%。${repeatable}`,
+    "blood-siphon": `造成伤害时获得 3.5% 吸血。${repeatable}`,
+    "ghost-shell": `子弹命中后附带小范围爆炸，并额外穿透 1 个敌人。${repeatable}`,
+    "bank-heist": `收益倍率 +14%，经验获取 +10%。${repeatable}`,
+    "survey-array": `视野范围 +70。${repeatable}`,
+    "deep-radar": `视野范围 +120。${repeatable}`
+  };
+
+  return descriptions[upgradeId];
 }
 
 function renderLeaderboard(entries: LeaderboardEntry[]): string {

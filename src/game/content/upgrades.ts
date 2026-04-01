@@ -85,7 +85,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "贯穿",
     tags: ["穿透", "清线"],
-    weight: 0.8
+    weight: 0.8,
+    once: true
   },
   "phase-cooling": {
     id: "phase-cooling",
@@ -155,7 +156,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "结算",
     tags: ["积分", "收益"],
-    weight: 1
+    weight: 1,
+    once: true
   },
   "pressure-core": {
     id: "pressure-core",
@@ -165,7 +167,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "后期爆发",
     tags: ["爆发", "贪局"],
-    weight: 0.7
+    weight: 0.7,
+    once: true
   },
   "auto-forge": {
     id: "auto-forge",
@@ -175,7 +178,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "升级续航",
     tags: ["回盾", "升级"],
-    weight: 0.8
+    weight: 0.8,
+    once: true
   },
   "lattice-armor": {
     id: "lattice-armor",
@@ -195,7 +199,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "场地联动",
     tags: ["地形", "陷阱"],
-    weight: 0.7
+    weight: 0.7,
+    once: true
   },
   "weapon-swap": {
     id: "weapon-swap",
@@ -217,7 +222,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "common",
     archetype: "弹幕扩张",
     tags: ["双发", "覆盖"],
-    weight: 0.9
+    weight: 0.9,
+    once: true
   },
   triptych: {
     id: "triptych",
@@ -249,7 +255,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "地形弹道",
     tags: ["反弹", "几何"],
-    weight: 0.7
+    weight: 0.7,
+    once: true
   },
   "halo-shards": {
     id: "halo-shards",
@@ -270,7 +277,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "追踪",
     tags: ["追踪", "锁定"],
-    weight: 0.7
+    weight: 0.7,
+    once: true
   },
   "giant-core": {
     id: "giant-core",
@@ -280,7 +288,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "epic",
     archetype: "重炮",
     tags: ["巨弹", "压制"],
-    weight: 0.7
+    weight: 0.7,
+    once: true
   },
   "blood-siphon": {
     id: "blood-siphon",
@@ -290,7 +299,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "吸血",
     tags: ["吸血", "续战"],
-    weight: 0.65
+    weight: 0.65,
+    once: true
   },
   "ghost-shell": {
     id: "ghost-shell",
@@ -300,7 +310,8 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     rarity: "rare",
     archetype: "爆裂",
     tags: ["爆炸", "清群"],
-    weight: 0.65
+    weight: 0.65,
+    once: true
   },
   "bank-heist": {
     id: "bank-heist",
