@@ -63,16 +63,26 @@ export function createAppShell(root: HTMLElement): void {
     touchLayer.classList.toggle("active", state.run.status === "running");
   };
 
-  createGame(gameCanvas, {
-    getState: () => state,
-    setState: (next) => {
-      state = next;
-    },
-    flushCommands: () => commandQueue.splice(0, commandQueue.length),
-    onStateChange: renderAll
-  });
-
   renderAll(state);
+
+  try {
+    createGame(gameCanvas, {
+      getState: () => state,
+      setState: (next) => {
+        state = next;
+      },
+      flushCommands: () => commandQueue.splice(0, commandQueue.length),
+      onStateChange: renderAll
+    });
+  } catch (error) {
+    console.error("Failed to initialize Phaser runtime", error);
+    gameCanvas.innerHTML = `
+      <div class="runtime-fallback">
+        <strong>移动端渲染初始化失败</strong>
+        <span>请尝试刷新页面，或切换到 Chrome / Safari 最新版本后重试。</span>
+      </div>
+    `;
+  }
 
   modalLayer.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
