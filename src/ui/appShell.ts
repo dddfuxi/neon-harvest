@@ -32,6 +32,9 @@ const rarityMap = {
 export function createAppShell(root: HTMLElement): void {
   let state = loadState();
   let selectedWeapon: WeaponId = state.meta.unlockedWeapons[0] ?? "pulse-blaster";
+  let onlineLeaderboard: LeaderboardEntry[] = [];
+  let leaderboardNotice = "";
+  let isUploadingScore = false;
   const commandQueue: UiCommand[] = [];
 
   root.innerHTML = `
@@ -41,6 +44,12 @@ export function createAppShell(root: HTMLElement): void {
           <div class="game-canvas" id="game-canvas"></div>
           <div class="hud-layer" id="hud-layer"></div>
           <div class="touch-layer" id="touch-layer"></div>
+          <div class="orientation-layer hidden" id="orientation-layer">
+            <div class="orientation-card panel">
+              <strong>请横屏游玩</strong>
+              <span>手机端战斗界面已改为横屏优先。旋转设备后继续。</span>
+            </div>
+          </div>
         </div>
         <div class="modal-layer" id="modal-layer"></div>
       </div>
@@ -51,6 +60,7 @@ export function createAppShell(root: HTMLElement): void {
   const hudLayer = root.querySelector<HTMLElement>("#hud-layer")!;
   const touchLayer = root.querySelector<HTMLElement>("#touch-layer")!;
   const modalLayer = root.querySelector<HTMLElement>("#modal-layer")!;
+  const orientationLayer = root.querySelector<HTMLElement>("#orientation-layer")!;
 
   setupTouchControls(touchLayer);
 
@@ -58,12 +68,16 @@ export function createAppShell(root: HTMLElement): void {
     state = next;
     persistState(state);
     renderHud(hudLayer, state);
-    renderModal(modalLayer, state, selectedWeapon);
+    renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore);
     modalLayer.style.pointerEvents = state.run.status === "running" ? "none" : "auto";
     touchLayer.classList.toggle("active", state.run.status === "running");
+    updateOrientationOverlay(orientationLayer, state.run.status === "running");
   };
 
   renderAll(state);
+  void refreshOnlineLeaderboard(() => {
+    renderAll(state);
+  });
 
   try {
     createGame(gameCanvas, {
@@ -103,6 +117,8 @@ export function createAppShell(root: HTMLElement): void {
         commandQueue.push({ type: "resume-run" });
       } else if (command === "exit-run") {
         commandQueue.push({ type: "exit-run" });
+      } else if (command === "upload-score") {
+        void uploadLatestScore();
       }
       return;
     }
@@ -125,10 +141,67 @@ export function createAppShell(root: HTMLElement): void {
     const weaponButton = target.closest<HTMLElement>("[data-weapon]");
     if (weaponButton) {
       selectedWeapon = weaponButton.dataset.weapon as WeaponId;
-      renderModal(modalLayer, state, selectedWeapon);
+      renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore);
       modalLayer.style.pointerEvents = state.run.status === "running" ? "none" : "auto";
     }
   });
+
+  window.addEventListener("resize", () => {
+    updateOrientationOverlay(orientationLayer, state.run.status === "running");
+  });
+
+  async function refreshOnlineLeaderboard(onDone?: () => void): Promise<void> {
+    try {
+      const response = await fetch("/api/leaderboard");
+      const payload = (await response.json()) as { entries?: LeaderboardEntry[]; error?: string };
+      onlineLeaderboard = Array.isArray(payload.entries) ? payload.entries : [];
+      leaderboardNotice = payload.error ?? "";
+    } catch {
+      leaderboardNotice = "在线排行榜暂时不可用";
+    } finally {
+      onDone?.();
+    }
+  }
+
+  async function uploadLatestScore(): Promise<void> {
+    const summary = state.meta.lastRunSummary ?? state.run.runSummary;
+    if (!summary || isUploadingScore) {
+      return;
+    }
+
+    isUploadingScore = true;
+    leaderboardNotice = "正在上传战绩...";
+    renderAll(state);
+
+    const payload: LeaderboardEntry = {
+      id: `score-${summary.result}-${summary.duration}-${summary.level}-${summary.enemiesDestroyed}-${summary.shardsBanked}`,
+      recordedAt: Date.now(),
+      weaponId: state.run.player.weaponId,
+      score: summary.shardsBanked,
+      result: summary.result,
+      duration: summary.duration,
+      level: summary.level,
+      enemiesDestroyed: summary.enemiesDestroyed
+    };
+
+    try {
+      const response = await fetch("/api/leaderboard", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+      const result = (await response.json()) as { entries?: LeaderboardEntry[]; error?: string };
+      onlineLeaderboard = Array.isArray(result.entries) ? result.entries : onlineLeaderboard;
+      leaderboardNotice = result.error ?? (response.ok ? "战绩已上传到在线排行榜" : "上传失败");
+    } catch {
+      leaderboardNotice = "上传失败，请稍后重试";
+    } finally {
+      isUploadingScore = false;
+      renderAll(state);
+    }
+  }
 }
 
 function renderHud(container: HTMLElement, state: SimulationState): void {
@@ -177,7 +250,14 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
   `;
 }
 
-function renderModal(container: HTMLElement, state: SimulationState, selectedWeapon: WeaponId): void {
+function renderModal(
+  container: HTMLElement,
+  state: SimulationState,
+  selectedWeapon: WeaponId,
+  onlineLeaderboard: LeaderboardEntry[],
+  leaderboardNotice: string,
+  isUploadingScore: boolean
+): void {
   const summary = state.meta.lastRunSummary ?? state.run.runSummary;
   const weapon = weaponDefinitions[selectedWeapon];
 
@@ -256,6 +336,14 @@ function renderModal(container: HTMLElement, state: SimulationState, selectedWea
             <strong>本机最高回收记录</strong>
           </div>
           ${renderLeaderboard(state.meta.leaderboard)}
+        </section>
+        <section class="panel menu-section leaderboard-section">
+          <div class="section-header">
+            <span class="label">在线榜</span>
+            <strong>公开战绩排行</strong>
+          </div>
+          ${leaderboardNotice ? `<p class="body-copy">${leaderboardNotice}</p>` : ""}
+          ${renderLeaderboard(onlineLeaderboard)}
         </section>
       </div>
     `;
@@ -376,6 +464,17 @@ function renderModal(container: HTMLElement, state: SimulationState, selectedWea
             <strong>本机前十</strong>
           </div>
           ${renderLeaderboard(state.meta.leaderboard)}
+        </div>
+        <div class="panel leaderboard-section">
+          <div class="section-header">
+            <span class="label">在线榜</span>
+            <strong>公开战绩排行</strong>
+          </div>
+          ${leaderboardNotice ? `<p class="body-copy">${leaderboardNotice}</p>` : ""}
+          ${renderLeaderboard(onlineLeaderboard)}
+          <div class="button-row">
+            <button type="button" class="button primary" data-command="upload-score" ${isUploadingScore ? "disabled" : ""}>${isUploadingScore ? "上传中..." : "上传本局战绩"}</button>
+          </div>
         </div>
         <div class="button-row">
           <button type="button" class="button primary" data-command="start-run">再来一局</button>
@@ -732,4 +831,12 @@ function normalizeVector(vector: { x: number; y: number }): { x: number; y: numb
     x: (vector.x / length) * scale,
     y: (vector.y / length) * scale
   };
+}
+
+function updateOrientationOverlay(container: HTMLElement, isRunning: boolean): void {
+  const shouldShow =
+    isRunning &&
+    window.matchMedia("(pointer: coarse)").matches &&
+    window.matchMedia("(orientation: portrait)").matches;
+  container.classList.toggle("hidden", !shouldShow);
 }
