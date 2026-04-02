@@ -189,6 +189,7 @@ function applyCommand(state: SimulationState, command: UiCommand): SimulationSta
 
 function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationState {
   const player = { ...state.run.player };
+  let hazards = [...state.run.hazards];
   const applied = [...state.run.appliedUpgrades, upgradeId];
   const definition = upgradeDefinitions[upgradeId];
   const discoveredUpgradeIds = state.meta.discoveredUpgradeIds.includes(upgradeId)
@@ -237,6 +238,10 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
     case "compound-interest":
       player.economyMultiplier *= 1.18;
       break;
+    case "pressure-core":
+      player.damageMultiplier *= 1.06;
+      player.projectileSpeedMultiplier *= 1.04;
+      break;
     case "auto-forge":
       player.maxShield += 10;
       player.shield = Math.min(player.maxShield, player.shield + 18);
@@ -244,6 +249,13 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
     case "lattice-armor":
       player.maxHp += 28;
       player.hp += 28;
+      break;
+    case "fracture-grid":
+      hazards = hazards.map((hazard) => ({
+        ...hazard,
+        radius: hazard.radius + 18,
+        damagePerSecond: hazard.damagePerSecond + 3
+      }));
       break;
     case "weapon-swap":
       if (definition.weaponSwapTo) {
@@ -303,6 +315,7 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       ...state.run,
       status: "running",
       player,
+      hazards,
       appliedUpgrades: applied,
       offeredUpgrades: [],
       tutorialHint: `构筑已接入：${definition.title}。`,
@@ -604,7 +617,7 @@ function spawnBoss(
 }
 
 function maybeAddHazards(state: SimulationState): SimulationState {
-  const hazardTier = Math.max(Math.floor(state.run.time / 150), Math.floor((state.run.objective.stage - 1) / 3));
+  const hazardTier = getHazardTier(state);
   if (hazardTier <= state.run.activeHazardTier || hazardTier === 0) {
     return state;
   }
@@ -757,6 +770,16 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
   };
 }
 
+function getHazardTier(state: SimulationState): number {
+  return Math.max(Math.floor(state.run.time / 150), Math.floor((state.run.objective.stage - 1) / 3));
+}
+
+function isEnemyInsideHazard(enemy: EnemyState, hazards: HazardState[]): boolean {
+  return hazards.some(
+    (hazard) => hazard.active && distance(enemy.position, hazard.position) <= hazard.radius + enemy.radius
+  );
+}
+
 function updateBossSkills(
   state: SimulationState,
   enemy: EnemyState,
@@ -872,7 +895,9 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
 
         if (distance(nextProjectile.position, enemy.position) <= nextProjectile.radius + enemy.radius) {
           collided = true;
-          const damage = nextProjectile.damage;
+          const hazardAmplifier =
+            state.run.appliedUpgrades.includes("fracture-grid") && isEnemyInsideHazard(enemy, state.run.hazards) ? 1.14 : 1;
+          const damage = nextProjectile.damage * hazardAmplifier;
           const nextEnemy = { ...enemy, hp: enemy.hp - damage };
           const weaponId = getWeaponIdByColor(nextProjectile.color);
           healed += damage * state.run.player.lifeSteal;
@@ -1003,15 +1028,15 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
       continue;
     }
 
-    enemies = enemies.map((enemy) => {
-      if (distance(enemy.position, hazard.position) >= hazard.radius + enemy.radius) {
-        return enemy;
-      }
-      return {
-        ...enemy,
-        hp: enemy.hp - hazard.damagePerSecond * deltaSeconds * (state.run.appliedUpgrades.includes("fracture-grid") ? 1.22 : 1)
-      };
-    });
+      enemies = enemies.map((enemy) => {
+        if (distance(enemy.position, hazard.position) >= hazard.radius + enemy.radius) {
+          return enemy;
+        }
+        return {
+          ...enemy,
+          hp: enemy.hp - hazard.damagePerSecond * deltaSeconds * (state.run.appliedUpgrades.includes("fracture-grid") ? 1.35 : 1)
+        };
+      });
 
     if (distance(state.run.player.position, hazard.position) <= hazard.radius + state.run.player.radius) {
       const damageResult = applyIncomingDamage(shield, hp, hazard.damagePerSecond * deltaSeconds);
@@ -1467,6 +1492,9 @@ function rollUpgrades(state: SimulationState): UpgradeId[] {
       return false;
     }
     if (upgrade.id === "compound-interest" && !state.meta.unlockedUpgradeIds.includes("compound-interest")) {
+      return false;
+    }
+    if (upgrade.id === "fracture-grid" && state.run.hazards.length === 0) {
       return false;
     }
     const meta = upgradeTreeMeta[upgrade.id];

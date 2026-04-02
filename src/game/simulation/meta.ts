@@ -27,6 +27,8 @@ export const defaultMetaState: MetaProgressState = {
   dashVariantUnlocked: false,
   unlockedUpgradeIds: [],
   discoveredUpgradeIds: [],
+  skillFeedbackClientId: "",
+  skillFeedback: {},
   purchases: [],
   lastRunSummary: null,
   leaderboard: []

@@ -184,6 +184,19 @@ export type RunSummary = {
   extractionBonus: number;
 };
 
+export type SkillVoteKind = "up" | "down";
+
+export type SkillFeedbackEntry = {
+  skillId: UpgradeId;
+  totalUp: number;
+  totalDown: number;
+  dailyUp: number;
+  dailyDown: number;
+  dailyDate: string;
+  userVote: SkillVoteKind | null;
+  userVotedToday: boolean;
+};
+
 export type LeaderboardEntry = {
   id: string;
   recordedAt: number;
@@ -209,6 +222,8 @@ export type MetaProgressState = {
   dashVariantUnlocked: boolean;
   unlockedUpgradeIds: UpgradeId[];
   discoveredUpgradeIds: UpgradeId[];
+  skillFeedbackClientId: string;
+  skillFeedback: Partial<Record<UpgradeId, SkillFeedbackEntry>>;
   purchases: string[];
   lastRunSummary: RunSummary | null;
   leaderboard: LeaderboardEntry[];

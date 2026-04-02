@@ -3,6 +3,13 @@ import type { RunSummary, SimulationState } from "../simulation/types";
 
 const STORAGE_KEY = "neon-harvest-save-v1";
 
+function createSkillFeedbackClientId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `client-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 function migrateLastRunSummary(
   summary: SimulationState["meta"]["lastRunSummary"]
 ): RunSummary | null {
@@ -57,6 +64,12 @@ export function loadState(): SimulationState {
         ...mergedMeta,
         unlockedWeapons,
         discoveredUpgradeIds: Array.isArray(mergedMeta.discoveredUpgradeIds) ? [...new Set(mergedMeta.discoveredUpgradeIds)] : [],
+        skillFeedbackClientId:
+          typeof mergedMeta.skillFeedbackClientId === "string" && mergedMeta.skillFeedbackClientId
+            ? mergedMeta.skillFeedbackClientId
+            : createSkillFeedbackClientId(),
+        skillFeedback:
+          mergedMeta.skillFeedback && typeof mergedMeta.skillFeedback === "object" ? mergedMeta.skillFeedback : {},
         lastRunSummary: migrateLastRunSummary(mergedMeta.lastRunSummary),
         leaderboard: Array.isArray(mergedMeta.leaderboard) ? mergedMeta.leaderboard.slice(0, 10) : []
       }

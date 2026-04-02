@@ -8,12 +8,12 @@ import {
   setVirtualInteract,
   setVirtualMove
 } from "../game/input/virtualControls";
-import { upgradeBranchLabels, upgradeDefinitions, upgradeTreeMeta, type UpgradeBranch } from "../game/content/upgrades";
+import { upgradeBranchLabels, upgradeDefinitions, upgradeTreeMeta, type UpgradeBranch, type UpgradeId } from "../game/content/upgrades";
 import { weaponDefinitions, type WeaponId } from "../game/content/weapons";
 import { type UiCommand } from "../game/simulation/engine";
 import { metaUpgrades } from "../game/simulation/meta";
 import { loadState, persistState } from "../game/storage/save";
-import type { LeaderboardEntry, SimulationState } from "../game/simulation/types";
+import type { LeaderboardEntry, SimulationState, SkillFeedbackEntry, SkillVoteKind } from "../game/simulation/types";
 import { createGame } from "../phaser/createGame";
 
 type OnlineRunSession = {
@@ -42,6 +42,7 @@ export function createAppShell(root: HTMLElement): void {
   let isUploadingScore = false;
   let leaderboardName = window.localStorage.getItem("neon-harvest-player-name") ?? "";
   let activeRunSession: OnlineRunSession | null = null;
+  const pendingSkillFeedback = new Set<UpgradeId>();
   const commandQueue: UiCommand[] = [];
 
   root.innerHTML = `
@@ -77,7 +78,7 @@ export function createAppShell(root: HTMLElement): void {
     const touchUiActive = shouldUseTouchUi();
     renderHud(hudLayer, state);
     renderTouchFeedback(touchLayer, state);
-    renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName);
+    renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName, pendingSkillFeedback);
     modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
     touchLayer.classList.toggle("active", state.run.status === "running" && touchUiActive);
     updateOrientationOverlay(orientationLayer, state.run.status === "running");
@@ -85,6 +86,9 @@ export function createAppShell(root: HTMLElement): void {
 
   renderAll(state);
   void refreshOnlineLeaderboard(() => {
+    renderAll(state);
+  });
+  void refreshSkillFeedback(() => {
     renderAll(state);
   });
 
@@ -133,6 +137,16 @@ export function createAppShell(root: HTMLElement): void {
       return;
     }
 
+    const skillVoteButton = target.closest<HTMLElement>("[data-skill-vote]");
+    if (skillVoteButton) {
+      const skillId = skillVoteButton.dataset.skillId as UpgradeId | undefined;
+      const vote = skillVoteButton.dataset.skillVote as SkillVoteKind | undefined;
+      if (skillId && vote) {
+        void submitSkillVote(skillId, vote);
+      }
+      return;
+    }
+
     const upgradeButton = target.closest<HTMLElement>("[data-upgrade]");
     if (upgradeButton) {
       commandQueue.push({
@@ -151,7 +165,7 @@ export function createAppShell(root: HTMLElement): void {
     const weaponButton = target.closest<HTMLElement>("[data-weapon]");
     if (weaponButton) {
       selectedWeapon = weaponButton.dataset.weapon as WeaponId;
-      renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName);
+      renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName, pendingSkillFeedback);
       modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
     }
   });
@@ -179,6 +193,62 @@ export function createAppShell(root: HTMLElement): void {
       leaderboardNotice = "在线排行榜暂时不可用";
     } finally {
       onDone?.();
+    }
+  }
+
+  function applySkillFeedbackEntries(entries: SkillFeedbackEntry[]): void {
+    state = {
+      ...state,
+      meta: {
+        ...state.meta,
+        skillFeedback: Object.fromEntries(entries.map((entry) => [entry.skillId, entry])) as SimulationState["meta"]["skillFeedback"]
+      }
+    };
+  }
+
+  async function refreshSkillFeedback(onDone?: () => void): Promise<void> {
+    try {
+      const response = await fetch(`/api/skill-feedback?clientId=${encodeURIComponent(state.meta.skillFeedbackClientId)}`);
+      const payload = (await response.json()) as { entries?: SkillFeedbackEntry[] };
+      if (Array.isArray(payload.entries)) {
+        applySkillFeedbackEntries(payload.entries);
+      }
+    } catch {
+      return;
+    } finally {
+      onDone?.();
+    }
+  }
+
+  async function submitSkillVote(skillId: UpgradeId, vote: SkillVoteKind): Promise<void> {
+    if (pendingSkillFeedback.has(skillId)) {
+      return;
+    }
+
+    pendingSkillFeedback.add(skillId);
+    renderAll(state);
+
+    try {
+      const response = await fetch("/api/skill-feedback", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          skillId,
+          vote,
+          clientId: state.meta.skillFeedbackClientId
+        })
+      });
+      const payload = (await response.json()) as { entries?: SkillFeedbackEntry[] };
+      if (response.ok && Array.isArray(payload.entries)) {
+        applySkillFeedbackEntries(payload.entries);
+      }
+    } catch {
+      return;
+    } finally {
+      pendingSkillFeedback.delete(skillId);
+      renderAll(state);
     }
   }
 
@@ -310,16 +380,10 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
   const runSeconds = Math.floor(state.run.time % 60)
     .toString()
     .padStart(2, "0");
+  const announcementMarkup = state.run.announcement ? renderAnnouncement(state.run.announcement) : "";
   if (isMobileLandscapeHud()) {
     container.innerHTML = `
-      ${
-        state.run.announcement
-          ? `<div class="announcement-banner tone-${state.run.announcement.tone}" style="--announcement-duration:${state.run.announcement.duration.toFixed(2)}s">
-              <strong>${state.run.announcement.title}</strong>
-              <span>${state.run.announcement.subtitle}</span>
-            </div>`
-          : ""
-      }
+      ${announcementMarkup}
       <div class="mobile-hud">
         <div class="panel mobile-vitals">
           <div class="mobile-bar-group">
@@ -341,14 +405,7 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
   }
 
   container.innerHTML = `
-    ${
-      state.run.announcement
-        ? `<div class="announcement-banner tone-${state.run.announcement.tone}" style="--announcement-duration:${state.run.announcement.duration.toFixed(2)}s">
-            <strong>${state.run.announcement.title}</strong>
-            <span>${state.run.announcement.subtitle}</span>
-          </div>`
-        : ""
-    }
+    ${announcementMarkup}
     <div class="hud-top">
       <div class="hud-cluster">
         ${card("护盾", `${Math.max(0, Math.ceil(state.run.player.shield))}<small> / ${state.run.player.maxShield}</small>`, shieldPercent)}
@@ -379,6 +436,19 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
   `;
 }
 
+function renderAnnouncement(announcement: SimulationState["run"]["announcement"]): string {
+  if (!announcement) {
+    return "";
+  }
+
+  const progress = Math.max(0, Math.min(1, announcement.timer / Math.max(0.001, announcement.duration)));
+  const phaseClass = announcement.tone === "phase" ? " objective-banner" : "";
+  return `<div class="announcement-banner${phaseClass} tone-${announcement.tone}" style="--announcement-progress:${progress.toFixed(3)}">
+      <strong>${announcement.title}</strong>
+      <span>${announcement.subtitle}</span>
+    </div>`;
+}
+
 function renderModal(
   container: HTMLElement,
   state: SimulationState,
@@ -386,7 +456,8 @@ function renderModal(
   onlineLeaderboard: LeaderboardEntry[],
   leaderboardNotice: string,
   isUploadingScore: boolean,
-  leaderboardName: string
+  leaderboardName: string,
+  pendingSkillFeedback: ReadonlySet<UpgradeId>
 ): void {
   const summary = state.meta.lastRunSummary ?? state.run.runSummary;
   const weapon = weaponDefinitions[selectedWeapon];
@@ -496,7 +567,7 @@ function renderModal(
             .map((upgradeId) => {
               const upgrade = upgradeDefinitions[upgradeId];
               return `
-                <button type="button" class="choice-card rarity-${upgrade.rarity}" data-upgrade="${upgradeId}">
+                <article class="choice-card rarity-${upgrade.rarity}">
                   <div class="choice-meta">
                     <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
                     <span class="rarity-type">${categoryMap[upgrade.category]}</span>
@@ -509,8 +580,12 @@ function renderModal(
                   ]
                     .map((tag) => `<span class="tag">${tag}</span>`)
                     .join("")}</div>
+                  ${renderSkillFeedbackControls(state, upgrade.id, pendingSkillFeedback.has(upgrade.id), "compact")}
                   <footer class="label">${upgrade.archetype}</footer>
-                </button>
+                  <div class="button-row">
+                    <button type="button" class="button primary choice-confirm-button" data-upgrade="${upgradeId}">选择强化</button>
+                  </div>
+                </article>
               `;
             })
             .join("")}
@@ -555,14 +630,7 @@ function renderModal(
             ${state.meta.unlockedWeapons.map((weaponId) => renderWeaponCard(weaponId, selectedWeapon)).join("")}
           </div>
         </div>
-        ${renderSkillCodex(state)}
-        <div class="panel menu-section leaderboard-section">
-          <div class="section-header">
-            <span class="label">排行榜</span>
-            <strong>最高战绩</strong>
-          </div>
-          ${renderLeaderboard(state.meta.leaderboard)}
-        </div>
+        ${renderSkillCodex(state, pendingSkillFeedback)}
         <div class="card-grid">
           ${metaUpgrades
             .map((upgrade) => {
@@ -770,17 +838,17 @@ function describeUpgrade(upgradeId: keyof typeof upgradeDefinitions): string {
     "repulsor-fins": `移动速度 +12%，碎片吸附范围 +34。${repeatable}`,
     "salvage-net": `经验获取 +20%。${repeatable}`,
     "compound-interest": `局内收益倍率 +18%。${repeatable}`,
-    "pressure-core": `撤离阶段解锁后，额外伤害倍率提高。${repeatable}`,
-    "auto-forge": `选择后立刻恢复 12 点护盾。${repeatable}`,
+    "pressure-core": `立刻获得 6% 伤害和 4% 弹速加成；撤离开启后再额外提高伤害。${repeatable}`,
+    "auto-forge": `最大护盾 +10，立刻恢复 18 点护盾；之后每次升级再恢复 18 点护盾。${repeatable}`,
     "lattice-armor": `最大生命 +28，并立刻恢复 28 点生命。${repeatable}`,
-    "fracture-grid": `强化危险区域联动伤害。更适合围绕地形和红圈作战。${repeatable}`,
+    "fracture-grid": `现有危险区立刻扩大并增强伤害；身处危险区内的敌人额外承受 14% 子弹伤害。${repeatable}`,
     "weapon-swap": `把当前武器切换为电弧发射器。${repeatable}`,
     "twin-fang": `额外 +1 发并列子弹。${repeatable}`,
     triptych: `最少变为三联发，但射速降低 8%。${repeatable}`,
     "rear-array": `身后追加一发自动副炮。${repeatable}`,
     "catacomb-rounds": `子弹额外获得 1 次弹射。${repeatable}`,
     "halo-shards": `击杀敌人时额外释放一圈裂片弹。${repeatable}`,
-    "seeker-lens": `子弹获得追踪修正，追踪强度 +0.08。${repeatable}`,
+    "seeker-lens": `子弹追踪强度 +0.22，弹速 +6%，边缘目标更容易命中。${repeatable}`,
     "giant-core": `弹体尺寸 +32%，伤害 +8%，弹速 -8%。${repeatable}`,
     "blood-siphon": `造成伤害时获得 3.5% 吸血。${repeatable}`,
     "ghost-shell": `子弹命中后附带小范围爆炸，并额外穿透 1 个敌人。${repeatable}`,
@@ -849,7 +917,7 @@ function renderRunSkillTree(summary: NonNullable<SimulationState["meta"]["lastRu
   `;
 }
 
-function renderSkillCodex(state: SimulationState): string {
+function renderSkillCodex(state: SimulationState, pendingSkillFeedback: ReadonlySet<UpgradeId>): string {
   const discovered = new Set(state.meta.discoveredUpgradeIds);
   const allSkills = Object.keys(upgradeDefinitions) as Array<keyof typeof upgradeDefinitions>;
   const discoveredCount = allSkills.filter((upgradeId) => discovered.has(upgradeId)).length;
@@ -874,6 +942,7 @@ function renderSkillCodex(state: SimulationState): string {
                 </div>
                 <h3>${unlocked ? upgrade.title : "未发现技能"}</h3>
                 <p>${unlocked ? meta.codexSummary : "首次在战斗中拿到这个技能后，会永久收录进图鉴。"}</p>
+                ${renderSkillFeedbackControls(state, upgradeId, pendingSkillFeedback.has(upgradeId), "codex", !unlocked)}
                 <footer>${unlocked ? upgrade.archetype : "等待解锁"}</footer>
               </article>
             `;
@@ -1153,6 +1222,40 @@ function renderTouchFeedback(container: HTMLElement, state: SimulationState): vo
   fullscreenButton?.style.setProperty("--cooldown-fill", "1");
   fullscreenButton?.classList.add("ready");
   pauseButton?.style.setProperty("--cooldown-fill", "1");
+}
+
+function renderSkillFeedbackControls(
+  state: SimulationState,
+  upgradeId: UpgradeId,
+  pending: boolean,
+  layout: "compact" | "codex",
+  disabled = false
+): string {
+  const entry = state.meta.skillFeedback[upgradeId];
+  const totalUp = entry?.totalUp ?? 0;
+  const totalDown = entry?.totalDown ?? 0;
+  const dailyUp = entry?.dailyUp ?? 0;
+  const dailyDown = entry?.dailyDown ?? 0;
+  const userVote = entry?.userVote ?? null;
+  const userVotedToday = entry?.userVotedToday ?? false;
+  const classes = `skill-feedback skill-feedback-${layout}`;
+  const disabledAttr = pending || disabled || userVotedToday ? "disabled" : "";
+
+  return `
+    <div class="${classes}">
+      <div class="vote-button-row">
+        <button type="button" class="vote-button ${userVote === "up" ? "active" : ""}" data-skill-id="${upgradeId}" data-skill-vote="up" ${disabledAttr}>
+          <span class="vote-icon">👍</span>
+          <span class="vote-count">${totalUp}</span>
+        </button>
+        <button type="button" class="vote-button down ${userVote === "down" ? "active" : ""}" data-skill-id="${upgradeId}" data-skill-vote="down" ${disabledAttr}>
+          <span class="vote-icon">👎</span>
+          <span class="vote-count">${totalDown}</span>
+        </button>
+      </div>
+      <span class="vote-daily">${disabled ? "未解锁前不可反馈" : userVotedToday ? "今日已反馈" : `今日 👍 ${dailyUp} / 👎 ${dailyDown}`}</span>
+    </div>
+  `;
 }
 
 function isMobileLandscapeHud(): boolean {
