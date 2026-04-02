@@ -1,5 +1,5 @@
 ﻿import { enemyDefinitions, getEnemySpawnMix } from "../content/enemies";
-import { upgradeDefinitions, upgradePool, type UpgradeId } from "../content/upgrades";
+import { upgradeBranchLabels, upgradeDefinitions, upgradePool, upgradeTreeMeta, type UpgradeId } from "../content/upgrades";
 import type { EnemyType } from "../content/enemies";
 import { weaponDefinitions, type WeaponId } from "../content/weapons";
 import type { InputSnapshot } from "../input/actions";
@@ -191,6 +191,9 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
   const player = { ...state.run.player };
   const applied = [...state.run.appliedUpgrades, upgradeId];
   const definition = upgradeDefinitions[upgradeId];
+  const discoveredUpgradeIds = state.meta.discoveredUpgradeIds.includes(upgradeId)
+    ? state.meta.discoveredUpgradeIds
+    : [...state.meta.discoveredUpgradeIds, upgradeId];
 
   switch (upgradeId) {
     case "weapon-tuning":
@@ -235,7 +238,8 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       player.economyMultiplier *= 1.18;
       break;
     case "auto-forge":
-      player.shield = Math.min(player.maxShield, player.shield + 12);
+      player.maxShield += 10;
+      player.shield = Math.min(player.maxShield, player.shield + 18);
       break;
     case "lattice-armor":
       player.maxHp += 28;
@@ -263,7 +267,8 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       player.killBurst = true;
       break;
     case "seeker-lens":
-      player.homingStrength += 0.08;
+      player.homingStrength += 0.22;
+      player.projectileSpeedMultiplier *= 1.06;
       break;
     case "giant-core":
       player.projectileSize *= 1.32;
@@ -289,6 +294,10 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
 
   return {
     ...state,
+    meta: {
+      ...state.meta,
+      discoveredUpgradeIds
+    },
     nextId: state.nextId + 1,
     run: {
       ...state.run,
@@ -297,13 +306,13 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       appliedUpgrades: applied,
       offeredUpgrades: [],
       tutorialHint: `构筑已接入：${definition.title}。`,
-      announcement: createAnnouncement(
-        state.nextId,
-        "构筑完成",
-        `${definition.title} 已接入，继续沿当前路线推进。`,
-        "upgrade"
-      ),
-      screenFlash: 0.9
+        announcement: createAnnouncement(
+          state.nextId,
+          "构筑完成",
+          `${upgradeBranchLabels[upgradeTreeMeta[upgradeId].branch]} · ${definition.title} 已接入，继续沿当前路线推进。`,
+          "upgrade"
+        ),
+        screenFlash: 0.9
     }
   };
 }
@@ -1248,6 +1257,9 @@ function maybeOfferLevelUp(state: SimulationState): SimulationState {
   player.xp -= player.xpToNext;
   player.xpLevel += 1;
   player.xpToNext = Math.floor(player.xpToNext * 1.52 + 26);
+  if (state.run.appliedUpgrades.includes("auto-forge")) {
+    player.shield = Math.min(player.maxShield, player.shield + 18);
+  }
 
   return {
     ...state,
@@ -1457,7 +1469,20 @@ function rollUpgrades(state: SimulationState): UpgradeId[] {
     if (upgrade.id === "compound-interest" && !state.meta.unlockedUpgradeIds.includes("compound-interest")) {
       return false;
     }
+    const meta = upgradeTreeMeta[upgrade.id];
+    if (meta.parents && !meta.parents.every((parentId) => state.run.appliedUpgrades.includes(parentId))) {
+      return false;
+    }
     return true;
+  }).map((upgrade) => {
+    const meta = upgradeTreeMeta[upgrade.id];
+    const sameBranchCount = state.run.appliedUpgrades.filter((upgradeId) => upgradeTreeMeta[upgradeId]?.branch === meta.branch).length;
+    const branchBias = sameBranchCount > 0 ? 1 + sameBranchCount * 0.28 : 1;
+    const stageBias = state.run.objective.stage >= meta.tier * 2 ? 1.08 : 0.92;
+    return {
+      ...upgrade,
+      weight: upgrade.weight * branchBias * stageBias
+    };
   });
 
   const selections: UpgradeId[] = [];
@@ -1539,6 +1564,7 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     highestStage: state.run.objective.stage,
     buildRecap,
     keyUpgrades: keyUpgradeTitles,
+    upgradeSequence: [...state.run.appliedUpgrades],
     deathReason,
     extractionBonus
   };

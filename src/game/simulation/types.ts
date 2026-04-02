@@ -179,6 +179,7 @@ export type RunSummary = {
   highestStage: number;
   buildRecap: string;
   keyUpgrades: string[];
+  upgradeSequence: UpgradeId[];
   deathReason: string;
   extractionBonus: number;
 };
@@ -207,6 +208,7 @@ export type MetaProgressState = {
   unlockedWeapons: WeaponId[];
   dashVariantUnlocked: boolean;
   unlockedUpgradeIds: UpgradeId[];
+  discoveredUpgradeIds: UpgradeId[];
   purchases: string[];
   lastRunSummary: RunSummary | null;
   leaderboard: LeaderboardEntry[];

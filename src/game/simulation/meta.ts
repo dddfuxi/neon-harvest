@@ -26,6 +26,7 @@ export const defaultMetaState: MetaProgressState = {
   unlockedWeapons: ["pulse-blaster", "arc-caster", "rift-carbine"],
   dashVariantUnlocked: false,
   unlockedUpgradeIds: [],
+  discoveredUpgradeIds: [],
   purchases: [],
   lastRunSummary: null,
   leaderboard: []

@@ -8,7 +8,7 @@ import {
   setVirtualInteract,
   setVirtualMove
 } from "../game/input/virtualControls";
-import { upgradeDefinitions } from "../game/content/upgrades";
+import { upgradeBranchLabels, upgradeDefinitions, upgradeTreeMeta, type UpgradeBranch } from "../game/content/upgrades";
 import { weaponDefinitions, type WeaponId } from "../game/content/weapons";
 import { type UiCommand } from "../game/simulation/engine";
 import { metaUpgrades } from "../game/simulation/meta";
@@ -74,11 +74,12 @@ export function createAppShell(root: HTMLElement): void {
   const renderAll = (next: SimulationState) => {
     state = next;
     persistState(state);
+    const touchUiActive = shouldUseTouchUi();
     renderHud(hudLayer, state);
     renderTouchFeedback(touchLayer, state);
     renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName);
     modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
-    touchLayer.classList.toggle("active", state.run.status === "running");
+    touchLayer.classList.toggle("active", state.run.status === "running" && touchUiActive);
     updateOrientationOverlay(orientationLayer, state.run.status === "running");
   };
 
@@ -313,7 +314,7 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
     container.innerHTML = `
       ${
         state.run.announcement
-          ? `<div class="announcement-banner tone-${state.run.announcement.tone}">
+          ? `<div class="announcement-banner tone-${state.run.announcement.tone}" style="--announcement-duration:${state.run.announcement.duration.toFixed(2)}s">
               <strong>${state.run.announcement.title}</strong>
               <span>${state.run.announcement.subtitle}</span>
             </div>`
@@ -342,7 +343,7 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
   container.innerHTML = `
     ${
       state.run.announcement
-        ? `<div class="announcement-banner tone-${state.run.announcement.tone}">
+        ? `<div class="announcement-banner tone-${state.run.announcement.tone}" style="--announcement-duration:${state.run.announcement.duration.toFixed(2)}s">
             <strong>${state.run.announcement.title}</strong>
             <span>${state.run.announcement.subtitle}</span>
           </div>`
@@ -554,6 +555,7 @@ function renderModal(
             ${state.meta.unlockedWeapons.map((weaponId) => renderWeaponCard(weaponId, selectedWeapon)).join("")}
           </div>
         </div>
+        ${renderSkillCodex(state)}
         <div class="panel menu-section leaderboard-section">
           <div class="section-header">
             <span class="label">排行榜</span>
@@ -749,6 +751,7 @@ function renderSummary(summary: NonNullable<SimulationState["meta"]["lastRunSumm
       <div class="body-copy">${summary.buildRecap ?? "本轮记录来自旧版本存档。"}</div>
       <div class="tag-row">${keyUpgradeTags}</div>
     </div>
+    ${renderRunSkillTree(summary)}
   `;
 }
 
@@ -787,6 +790,98 @@ function describeUpgrade(upgradeId: keyof typeof upgradeDefinitions): string {
   };
 
   return descriptions[upgradeId];
+}
+
+function renderRunSkillTree(summary: NonNullable<SimulationState["meta"]["lastRunSummary"]>): string {
+  if (!summary.upgradeSequence || summary.upgradeSequence.length === 0) {
+    return `
+      <div class="panel skill-tree-panel">
+        <div class="section-header">
+          <span class="label">构筑树</span>
+          <strong>本轮未形成明显分支</strong>
+        </div>
+        <p class="body-copy">这局主要依靠基础火力推进，还没有点出明确的流派链路。</p>
+      </div>
+    `;
+  }
+
+  const branchOrder: UpgradeBranch[] = ["core", "barrage", "precision", "survival", "mobility", "economy", "scout"];
+  const grouped = branchOrder
+    .map((branch) => ({
+      branch,
+      upgrades: summary.upgradeSequence.filter((upgradeId) => upgradeTreeMeta[upgradeId]?.branch === branch)
+    }))
+    .filter((entry) => entry.upgrades.length > 0);
+
+  return `
+    <div class="panel skill-tree-panel">
+      <div class="section-header">
+        <span class="label">构筑树</span>
+        <strong>本轮升级路线</strong>
+      </div>
+      <div class="skill-tree-grid">
+        ${grouped
+          .map(
+            ({ branch, upgrades }) => `
+              <article class="skill-tree-branch">
+                <h3>${upgradeBranchLabels[branch]}</h3>
+                <div class="skill-node-list">
+                  ${upgrades
+                    .map((upgradeId, index) => {
+                      const upgrade = upgradeDefinitions[upgradeId];
+                      const meta = upgradeTreeMeta[upgradeId];
+                      return `<div class="skill-node tier-${meta.tier}">
+                        <span class="skill-node-order">${index + 1}</span>
+                        <div>
+                          <strong>${upgrade.title}</strong>
+                          <span>T${meta.tier} · ${upgrade.archetype}</span>
+                        </div>
+                      </div>`;
+                    })
+                    .join("")}
+                </div>
+              </article>
+            `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderSkillCodex(state: SimulationState): string {
+  const discovered = new Set(state.meta.discoveredUpgradeIds);
+  const allSkills = Object.keys(upgradeDefinitions) as Array<keyof typeof upgradeDefinitions>;
+  const discoveredCount = allSkills.filter((upgradeId) => discovered.has(upgradeId)).length;
+
+  return `
+    <div class="panel menu-section">
+      <div class="section-header">
+        <span class="label">技能图鉴</span>
+        <strong>已收录 ${discoveredCount} / ${allSkills.length}</strong>
+      </div>
+      <div class="skill-codex-grid">
+        ${allSkills
+          .map((upgradeId) => {
+            const unlocked = discovered.has(upgradeId);
+            const upgrade = upgradeDefinitions[upgradeId];
+            const meta = upgradeTreeMeta[upgradeId];
+            return `
+              <article class="meta-card codex-card ${unlocked ? "discovered" : "locked"}">
+                <div class="choice-meta">
+                  <span class="rarity-pill">${upgradeBranchLabels[meta.branch]}</span>
+                  <span class="rarity-type">T${meta.tier}</span>
+                </div>
+                <h3>${unlocked ? upgrade.title : "未发现技能"}</h3>
+                <p>${unlocked ? meta.codexSummary : "首次在战斗中拿到这个技能后，会永久收录进图鉴。"}</p>
+                <footer>${unlocked ? upgrade.archetype : "等待解锁"}</footer>
+              </article>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
 }
 
 function renderLeaderboard(entries: LeaderboardEntry[]): string {
@@ -973,6 +1068,8 @@ function setupTouchControls(container: HTMLElement): void {
     setVirtualControlsEnabled(true);
     if (action === "dash") {
       queueVirtualDash();
+    } else if (action === "fullscreen") {
+      void toggleFullscreen(container);
     } else if (action === "pause") {
       queueVirtualPause();
     }
@@ -1002,6 +1099,25 @@ function setupTouchControls(container: HTMLElement): void {
   });
 }
 
+async function toggleFullscreen(container: HTMLElement): Promise<void> {
+  const fullscreenTarget = container.closest(".game-stage") as HTMLElement | null;
+  if (!fullscreenTarget) {
+    return;
+  }
+
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      return;
+    }
+    if (fullscreenTarget.requestFullscreen) {
+      await fullscreenTarget.requestFullscreen();
+    }
+  } catch {
+    return;
+  }
+}
+
 function normalizeVector(vector: { x: number; y: number }): { x: number; y: number } {
   const length = Math.hypot(vector.x, vector.y);
   if (length <= 0.0001) {
@@ -1015,7 +1131,7 @@ function normalizeVector(vector: { x: number; y: number }): { x: number; y: numb
 }
 
 function renderTouchFeedback(container: HTMLElement, state: SimulationState): void {
-  if (state.run.status !== "running") {
+  if (state.run.status !== "running" || !shouldUseTouchUi()) {
     for (const button of container.querySelectorAll<HTMLElement>("[data-touch-button]")) {
       button.style.setProperty("--cooldown-fill", "1");
       button.classList.remove("ready", "pressed");
@@ -1025,6 +1141,7 @@ function renderTouchFeedback(container: HTMLElement, state: SimulationState): vo
 
   const dashButton = container.querySelector<HTMLElement>("[data-touch-button='dash']");
   const interactButton = container.querySelector<HTMLElement>("[data-touch-button='interact']");
+  const fullscreenButton = container.querySelector<HTMLElement>("[data-touch-button='fullscreen']");
   const pauseButton = container.querySelector<HTMLElement>("[data-touch-button='pause']");
   const dashRatio =
     state.run.player.dashTimer <= 0 ? 1 : Math.max(0, 1 - state.run.player.dashTimer / Math.max(0.001, state.run.player.dashCooldown));
@@ -1033,17 +1150,20 @@ function renderTouchFeedback(container: HTMLElement, state: SimulationState): vo
   dashButton?.classList.toggle("ready", dashRatio >= 0.995);
   interactButton?.style.setProperty("--cooldown-fill", state.run.extraction.unlocked ? "1" : "0.22");
   interactButton?.classList.toggle("ready", state.run.extraction.unlocked);
+  fullscreenButton?.style.setProperty("--cooldown-fill", "1");
+  fullscreenButton?.classList.add("ready");
   pauseButton?.style.setProperty("--cooldown-fill", "1");
 }
 
 function isMobileLandscapeHud(): boolean {
-  return window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(orientation: landscape)").matches;
+  return shouldUseTouchUi() && window.matchMedia("(orientation: landscape)").matches;
 }
 
 function updateOrientationOverlay(container: HTMLElement, isRunning: boolean): void {
-  const shouldShow =
-    isRunning &&
-    window.matchMedia("(pointer: coarse)").matches &&
-    window.matchMedia("(orientation: portrait)").matches;
+  const shouldShow = isRunning && shouldUseTouchUi() && window.matchMedia("(orientation: portrait)").matches;
   container.classList.toggle("hidden", !shouldShow);
+}
+
+function shouldUseTouchUi(): boolean {
+  return window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(hover: none)").matches;
 }

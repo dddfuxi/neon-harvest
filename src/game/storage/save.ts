@@ -18,6 +18,7 @@ function migrateLastRunSummary(
     highestStage: summary.highestStage ?? 1,
     buildRecap: summary.buildRecap ?? "本轮记录来自旧版本存档。",
     keyUpgrades: summary.keyUpgrades ?? [],
+    upgradeSequence: summary.upgradeSequence ?? [],
     deathReason: summary.deathReason ?? (summary.result === "extracted" ? "成功撤离，结算完成" : "旧版本未记录失败原因")
   };
 }
@@ -55,6 +56,7 @@ export function loadState(): SimulationState {
       meta: {
         ...mergedMeta,
         unlockedWeapons,
+        discoveredUpgradeIds: Array.isArray(mergedMeta.discoveredUpgradeIds) ? [...new Set(mergedMeta.discoveredUpgradeIds)] : [],
         lastRunSummary: migrateLastRunSummary(mergedMeta.lastRunSummary),
         leaderboard: Array.isArray(mergedMeta.leaderboard) ? mergedMeta.leaderboard.slice(0, 10) : []
       }

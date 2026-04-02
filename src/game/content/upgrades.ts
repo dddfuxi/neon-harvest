@@ -46,6 +46,22 @@ export type UpgradeDefinition = {
   weaponSwapTo?: WeaponId;
 };
 
+export type UpgradeBranch =
+  | "core"
+  | "barrage"
+  | "precision"
+  | "survival"
+  | "mobility"
+  | "economy"
+  | "scout";
+
+export type UpgradeTreeMeta = {
+  branch: UpgradeBranch;
+  tier: 1 | 2 | 3;
+  parents?: UpgradeId[];
+  codexSummary: string;
+};
+
 export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
   "weapon-tuning": {
     id: "weapon-tuning",
@@ -347,3 +363,44 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
 };
 
 export const upgradePool = Object.values(upgradeDefinitions);
+
+export const upgradeBranchLabels: Record<UpgradeBranch, string> = {
+  core: "武器核心",
+  barrage: "弹幕扩张",
+  precision: "重炮精确",
+  survival: "生存续航",
+  mobility: "机动位移",
+  economy: "收益运营",
+  scout: "侦测视野"
+};
+
+export const upgradeTreeMeta: Record<UpgradeId, UpgradeTreeMeta> = {
+  "weapon-tuning": { branch: "core", tier: 1, codexSummary: "当前武器等级 +1，直接提高主武器成长。" },
+  "overclock-rounds": { branch: "core", tier: 1, codexSummary: "稳定提高子弹伤害，是所有输出流的底座。" },
+  "heat-sink": { branch: "core", tier: 1, codexSummary: "提高射速与弹速，强化持续压制感。" },
+  "kinetic-echo": { branch: "precision", tier: 2, parents: ["overclock-rounds"], codexSummary: "额外穿透敌人，适合直线清场与点杀。" },
+  "phase-cooling": { branch: "survival", tier: 1, codexSummary: "最大护盾与即时护盾回复同步提高。" },
+  "ion-shell": { branch: "survival", tier: 1, codexSummary: "降低承受伤害，适合高压站场。" },
+  "rapid-cycle": { branch: "barrage", tier: 1, parents: ["heat-sink"], codexSummary: "大幅强化射速，推动弹幕流成型。" },
+  "blink-drive": { branch: "mobility", tier: 1, codexSummary: "缩短冲刺冷却并提高冲刺距离。" },
+  "repulsor-fins": { branch: "mobility", tier: 1, codexSummary: "提高移速与拾取效率，利于拉扯滚雪球。" },
+  "salvage-net": { branch: "economy", tier: 1, codexSummary: "提高碎片转化效率，帮助更快进入成型期。" },
+  "compound-interest": { branch: "economy", tier: 2, parents: ["salvage-net"], codexSummary: "提高局后收益，偏长局运营路线。" },
+  "pressure-core": { branch: "precision", tier: 3, parents: ["kinetic-echo", "giant-core"], codexSummary: "撤离开启后火力继续提高，奖励高风险贪场。" },
+  "auto-forge": { branch: "survival", tier: 2, parents: ["phase-cooling"], codexSummary: "每次升级回盾，让成长和续航绑定。" },
+  "lattice-armor": { branch: "survival", tier: 1, codexSummary: "提高机体耐久，减少护盾失守后的暴毙。" },
+  "fracture-grid": { branch: "precision", tier: 3, parents: ["kinetic-echo"], codexSummary: "把危险区变成火力放大器，强调地形联动。" },
+  "weapon-swap": { branch: "core", tier: 2, parents: ["heat-sink"], codexSummary: "将当前武器重构为另一种打法核心。" },
+  "twin-fang": { branch: "barrage", tier: 1, codexSummary: "并列双发，直接拉高覆盖与命中。" },
+  triptych: { branch: "barrage", tier: 2, parents: ["twin-fang"], codexSummary: "把火力展开成三联扇面，强化中近距控场。" },
+  "rear-array": { branch: "barrage", tier: 2, parents: ["twin-fang"], codexSummary: "补足身后火力，适合风筝与边走边打。" },
+  "catacomb-rounds": { branch: "precision", tier: 2, parents: ["kinetic-echo"], codexSummary: "子弹在障碍之间反弹，地图越复杂收益越高。" },
+  "halo-shards": { branch: "barrage", tier: 3, parents: ["triptych"], codexSummary: "击杀后裂片扩散，快速形成连锁清屏。" },
+  "seeker-lens": { branch: "precision", tier: 2, parents: ["rapid-cycle"], codexSummary: "为弹体加入追踪修正，提升边缘命中率。" },
+  "giant-core": { branch: "precision", tier: 2, parents: ["overclock-rounds"], codexSummary: "弹体更大更重，强化重炮压制感。" },
+  "blood-siphon": { branch: "survival", tier: 2, parents: ["rapid-cycle"], codexSummary: "把输出转为续航，适合高命中高频武器。" },
+  "ghost-shell": { branch: "barrage", tier: 2, parents: ["twin-fang"], codexSummary: "命中后触发小范围爆裂，强化清群效率。" },
+  "bank-heist": { branch: "economy", tier: 2, parents: ["salvage-net"], codexSummary: "提高未结算碎片的即时收益，鼓励长局贪场。" },
+  "survey-array": { branch: "scout", tier: 1, codexSummary: "扩大视野范围，让玩家更早读场。" },
+  "deep-radar": { branch: "scout", tier: 2, parents: ["survey-array"], codexSummary: "进一步拉大视野，适合黑暗地图与远程打法。" }
+};
