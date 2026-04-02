@@ -669,7 +669,8 @@ function renderLeaderboard(entries: LeaderboardEntry[]): string {
             <article class="leaderboard-row">
               <div class="leaderboard-rank">#${index + 1}</div>
               <div class="leaderboard-main">
-                <strong>${entry.score}</strong>
+                <strong>${escapeHtml(entry.playerName || "Anonymous")}</strong>
+                <span>${entry.score} 分</span>
                 <span>${weapon.name} · ${entry.result === "extracted" ? "成功撤离" : "战败"}</span>
               </div>
               <div class="leaderboard-meta">
