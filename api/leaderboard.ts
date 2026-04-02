@@ -1,3 +1,5 @@
+import { createClient } from "redis";
+
 type ScoreEntry = {
   id: string;
   recordedAt: number;
@@ -28,11 +30,11 @@ function setCors(response: VercelResponse): void {
   response.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-async function fetchRedis(path: string, init?: RequestInit): Promise<Response> {
+async function fetchRedisRest(path: string, init?: RequestInit): Promise<Response> {
   const baseUrl = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!baseUrl || !token) {
-    throw new Error("Leaderboard backend not configured");
+    throw new Error("REST backend not configured");
   }
 
   return fetch(`${baseUrl}${path}`, {
@@ -45,8 +47,8 @@ async function fetchRedis(path: string, init?: RequestInit): Promise<Response> {
   });
 }
 
-async function readScores(): Promise<ScoreEntry[]> {
-  const response = await fetchRedis(`/get/${encodeURIComponent(LEADERBOARD_KEY)}`);
+async function readScoresViaRest(): Promise<ScoreEntry[]> {
+  const response = await fetchRedisRest(`/get/${encodeURIComponent(LEADERBOARD_KEY)}`);
   const payload = (await response.json()) as { result?: string | null };
   if (!payload.result) {
     return [];
@@ -60,11 +62,72 @@ async function readScores(): Promise<ScoreEntry[]> {
   }
 }
 
-async function writeScores(entries: ScoreEntry[]): Promise<void> {
-  await fetchRedis(`/set/${encodeURIComponent(LEADERBOARD_KEY)}`, {
+async function writeScoresViaRest(entries: ScoreEntry[]): Promise<void> {
+  await fetchRedisRest(`/set/${encodeURIComponent(LEADERBOARD_KEY)}`, {
     method: "POST",
     body: JSON.stringify(entries)
   });
+}
+
+async function withRedisUrl<T>(action: (client: ReturnType<typeof createClient>) => Promise<T>): Promise<T> {
+  const redisUrl =
+    process.env.REDIS_URL ??
+    process.env.UPSTASH_REDIS_REST_REDIS_URL ??
+    process.env.UPSTASH_REDIS_REDIS_URL;
+
+  if (!redisUrl) {
+    throw new Error("Redis URL backend not configured");
+  }
+
+  const client = createClient({
+    url: redisUrl
+  });
+
+  await client.connect();
+  try {
+    return await action(client);
+  } finally {
+    await client.disconnect();
+  }
+}
+
+async function readScoresViaRedisUrl(): Promise<ScoreEntry[]> {
+  return withRedisUrl(async (client) => {
+    const payload = await client.get(LEADERBOARD_KEY);
+    if (!payload) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(payload) as ScoreEntry[];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+async function writeScoresViaRedisUrl(entries: ScoreEntry[]): Promise<void> {
+  await withRedisUrl(async (client) => {
+    await client.set(LEADERBOARD_KEY, JSON.stringify(entries));
+  });
+}
+
+async function readScores(): Promise<ScoreEntry[]> {
+  const hasRest = !!(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL);
+  if (hasRest) {
+    return readScoresViaRest();
+  }
+  return readScoresViaRedisUrl();
+}
+
+async function writeScores(entries: ScoreEntry[]): Promise<void> {
+  const hasRest = !!(process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL);
+  if (hasRest) {
+    await writeScoresViaRest(entries);
+    return;
+  }
+  await writeScoresViaRedisUrl(entries);
 }
 
 function normalizeEntry(input: unknown): ScoreEntry | null {
