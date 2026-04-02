@@ -1,4 +1,4 @@
-import type { MetaProgressState, MetaUpgrade } from "./types";
+import type { MetaProgressState, MetaUpgrade, PreRunSupply, PreRunSupplyId } from "./types";
 
 export const metaUpgrades: MetaUpgrade[] = [
   {
@@ -29,10 +29,49 @@ export const defaultMetaState: MetaProgressState = {
   discoveredUpgradeIds: [],
   skillFeedbackClientId: "",
   skillFeedback: {},
+  supplyInventory: {},
   purchases: [],
   lastRunSummary: null,
   leaderboard: []
 };
+
+export const preRunSupplyDefinitions: PreRunSupply[] = [
+  {
+    id: "weapon-oil",
+    name: "火控校准包",
+    description: "开局武器等级 +1，只影响这一局的起步火力。",
+    cost: 28,
+    maxStock: 3
+  },
+  {
+    id: "shield-pack",
+    name: "护盾应急包",
+    description: "开局额外恢复一段护盾，前期更容易站稳。",
+    cost: 24,
+    maxStock: 3
+  },
+  {
+    id: "field-notes",
+    name: "战场记录片",
+    description: "开局获得额外经验，更快进入第一次升级。",
+    cost: 22,
+    maxStock: 3
+  },
+  {
+    id: "emergency-repair",
+    name: "应急修复单元",
+    description: "本局死亡时自动抢修 1 次，把机体强行拉回战线。",
+    cost: 40,
+    maxStock: 2
+  },
+  {
+    id: "risk-protocol",
+    name: "风险协议",
+    description: "本局提高威胁等级，敌群和危险区更强，但结算倍率同步上调。",
+    cost: 34,
+    maxStock: 3
+  }
+];
 
 export function buyMetaUpgrade(meta: MetaProgressState, upgradeId: string): MetaProgressState {
   if (meta.purchases.includes(upgradeId)) {
@@ -70,4 +109,25 @@ export function buyMetaUpgrade(meta: MetaProgressState, upgradeId: string): Meta
   }
 
   return nextMeta;
+}
+
+export function buyPreRunSupply(meta: MetaProgressState, supplyId: PreRunSupplyId): MetaProgressState {
+  const definition = preRunSupplyDefinitions.find((entry) => entry.id === supplyId);
+  if (!definition || meta.credits < definition.cost) {
+    return meta;
+  }
+
+  const currentStock = meta.supplyInventory[supplyId] ?? 0;
+  if (currentStock >= definition.maxStock) {
+    return meta;
+  }
+
+  return {
+    ...meta,
+    credits: meta.credits - definition.cost,
+    supplyInventory: {
+      ...meta.supplyInventory,
+      [supplyId]: currentStock + 1
+    }
+  };
 }

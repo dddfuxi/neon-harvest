@@ -70,6 +70,8 @@ export function loadState(): SimulationState {
             : createSkillFeedbackClientId(),
         skillFeedback:
           mergedMeta.skillFeedback && typeof mergedMeta.skillFeedback === "object" ? mergedMeta.skillFeedback : {},
+        supplyInventory:
+          mergedMeta.supplyInventory && typeof mergedMeta.supplyInventory === "object" ? mergedMeta.supplyInventory : {},
         lastRunSummary: migrateLastRunSummary(mergedMeta.lastRunSummary),
         leaderboard: Array.isArray(mergedMeta.leaderboard) ? mergedMeta.leaderboard.slice(0, 10) : []
       }

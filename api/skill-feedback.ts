@@ -233,22 +233,9 @@ async function applyVote(
   const rawEntry = await client.hGet(SKILL_FEEDBACK_HASH_KEY, skillId);
   let entry = resetDailyCountsIfNeeded(parseStoredEntry(rawEntry, skillId), today);
   const existingVoteEntry = parseStoredVoteEntry(await client.hGet(voteKey, skillId));
-  const existingVote = existingVoteEntry?.vote ?? null;
 
   if (existingVoteEntry?.votedOn === today) {
     return readSkillFeedbackEntries(client, payload.clientId);
-  }
-
-  if (existingVote === "up") {
-    entry.totalUp = Math.max(0, entry.totalUp - 1);
-    if (entry.dailyDate === today) {
-      entry.dailyUp = Math.max(0, entry.dailyUp - 1);
-    }
-  } else if (existingVote === "down") {
-    entry.totalDown = Math.max(0, entry.totalDown - 1);
-    if (entry.dailyDate === today) {
-      entry.dailyDown = Math.max(0, entry.dailyDown - 1);
-    }
   }
 
   if (payload.vote === "up") {

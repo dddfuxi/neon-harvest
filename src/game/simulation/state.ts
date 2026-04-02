@@ -173,6 +173,8 @@ export function createInitialState(): SimulationState {
       bossEventTriggered: false,
       bossSpawnCount: 0,
       bossAlertTimer: 0,
+      emergencyRepairCharges: 0,
+      riskProtocolTier: 0,
       lastDamageSource: "",
       tutorialHint: "\u7528 WASD \u79fb\u52a8\uff0c\u7528\u9f20\u6807\u7784\u51c6\uff0c\u5148\u7a33\u4f4f\u9635\u811a\u7b49\u5f85\u64a4\u79bb\u7a97\u53e3\u5f00\u542f\u3002",
       screenFlash: 0,
@@ -189,10 +191,48 @@ export function createRunState(previous: SimulationState, weaponId?: PlayerState
   const skillRoll = randomChoice(previous.rngSeed, characterSkillPool);
   const basePlayer = createPlayerState(chosenWeapon, previous.meta.dashVariantUnlocked, skillRoll.value);
   const obstacleResult = generateObstacles(previous.world.seed, previous.world.chunkSize, basePlayer.position);
+  const supplyInventory = { ...previous.meta.supplyInventory };
+  const activatedSupplies: string[] = [];
+  let emergencyRepairCharges = 0;
+  let riskProtocolTier = 0;
+
+  if ((supplyInventory["weapon-oil"] ?? 0) > 0) {
+    supplyInventory["weapon-oil"] = (supplyInventory["weapon-oil"] ?? 0) - 1;
+    basePlayer.weaponLevel += 1;
+    activatedSupplies.push("武器 Lv.+1");
+  }
+
+  if ((supplyInventory["shield-pack"] ?? 0) > 0) {
+    supplyInventory["shield-pack"] = (supplyInventory["shield-pack"] ?? 0) - 1;
+    basePlayer.shield = Math.min(basePlayer.maxShield, basePlayer.shield + 24);
+    activatedSupplies.push("额外护盾");
+  }
+
+  if ((supplyInventory["field-notes"] ?? 0) > 0) {
+    supplyInventory["field-notes"] = (supplyInventory["field-notes"] ?? 0) - 1;
+    basePlayer.xp += 26;
+    activatedSupplies.push("额外经验");
+  }
+
+  if ((supplyInventory["emergency-repair"] ?? 0) > 0) {
+    supplyInventory["emergency-repair"] = (supplyInventory["emergency-repair"] ?? 0) - 1;
+    emergencyRepairCharges = 1;
+    activatedSupplies.push("应急修复");
+  }
+
+  if ((supplyInventory["risk-protocol"] ?? 0) > 0) {
+    supplyInventory["risk-protocol"] = (supplyInventory["risk-protocol"] ?? 0) - 1;
+    riskProtocolTier = 1;
+    activatedSupplies.push("风险协议");
+  }
 
   return {
     ...previous,
     rngSeed: skillRoll.seed,
+    meta: {
+      ...previous.meta,
+      supplyInventory
+    },
     run: {
       ...previous.run,
       status: "running",
@@ -229,8 +269,13 @@ export function createRunState(previous: SimulationState, weaponId?: PlayerState
       bossEventTriggered: false,
       bossSpawnCount: 0,
       bossAlertTimer: 0,
+      emergencyRepairCharges,
+      riskProtocolTier,
       lastDamageSource: "",
-      tutorialHint: "\u5148\u505a\u51fa\u7b2c\u4e00\u8f6e\u6218\u6597\u6784\u7b51\uff0c\u4e4b\u540e\u518d\u51b3\u5b9a\u662f\u7ee7\u7eed\u63a8\u8fdb\u8fd8\u662f\u64a4\u79bb\u3002",
+      tutorialHint:
+        activatedSupplies.length > 0
+          ? `起始补给已生效：${activatedSupplies.join(" · ")}。先稳住第一轮阵线。`
+          : "\u5148\u505a\u51fa\u7b2c\u4e00\u8f6e\u6218\u6597\u6784\u7b51\uff0c\u4e4b\u540e\u518d\u51b3\u5b9a\u662f\u7ee7\u7eed\u63a8\u8fdb\u8fd8\u662f\u64a4\u79bb\u3002",
       screenFlash: 0,
       runSummary: null
     }

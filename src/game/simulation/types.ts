@@ -173,6 +173,7 @@ export type RunSummary = {
   level: number;
   weaponId: WeaponId;
   weaponLevel: number;
+  riskProtocolTier: number;
   shardsBanked: number;
   enemiesDestroyed: number;
   objectivesCompleted: number;
@@ -209,6 +210,21 @@ export type LeaderboardEntry = {
   enemiesDestroyed: number;
 };
 
+export type PreRunSupplyId =
+  | "weapon-oil"
+  | "shield-pack"
+  | "field-notes"
+  | "emergency-repair"
+  | "risk-protocol";
+
+export type PreRunSupply = {
+  id: PreRunSupplyId;
+  name: string;
+  description: string;
+  cost: number;
+  maxStock: number;
+};
+
 export type MetaUpgrade = {
   id: "weapon-cache" | "dash-tuning" | "salvage-charter";
   name: string;
@@ -224,6 +240,7 @@ export type MetaProgressState = {
   discoveredUpgradeIds: UpgradeId[];
   skillFeedbackClientId: string;
   skillFeedback: Partial<Record<UpgradeId, SkillFeedbackEntry>>;
+  supplyInventory: Partial<Record<PreRunSupplyId, number>>;
   purchases: string[];
   lastRunSummary: RunSummary | null;
   leaderboard: LeaderboardEntry[];
@@ -256,6 +273,8 @@ export type RunState = {
   bossEventTriggered: boolean;
   bossSpawnCount: number;
   bossAlertTimer: number;
+  emergencyRepairCharges: number;
+  riskProtocolTier: number;
   lastDamageSource: string;
   tutorialHint: string;
   screenFlash: number;

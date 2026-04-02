@@ -11,9 +11,9 @@ import {
 import { upgradeBranchLabels, upgradeDefinitions, upgradeTreeMeta, type UpgradeBranch, type UpgradeId } from "../game/content/upgrades";
 import { weaponDefinitions, type WeaponId } from "../game/content/weapons";
 import { type UiCommand } from "../game/simulation/engine";
-import { metaUpgrades } from "../game/simulation/meta";
+import { metaUpgrades, preRunSupplyDefinitions } from "../game/simulation/meta";
 import { loadState, persistState } from "../game/storage/save";
-import type { LeaderboardEntry, SimulationState, SkillFeedbackEntry, SkillVoteKind } from "../game/simulation/types";
+import type { LeaderboardEntry, PreRunSupplyId, SimulationState, SkillFeedbackEntry, SkillVoteKind } from "../game/simulation/types";
 import { createGame } from "../phaser/createGame";
 
 type OnlineRunSession = {
@@ -72,13 +72,23 @@ export function createAppShell(root: HTMLElement): void {
 
   setupTouchControls(touchLayer);
 
+  const rerenderModal = () => {
+    const previousMenuShell = modalLayer.querySelector<HTMLElement>(".menu-shell");
+    const previousScrollTop = previousMenuShell?.scrollTop ?? 0;
+    renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName, pendingSkillFeedback);
+    const nextMenuShell = modalLayer.querySelector<HTMLElement>(".menu-shell");
+    if (nextMenuShell) {
+      nextMenuShell.scrollTop = previousScrollTop;
+    }
+  };
+
   const renderAll = (next: SimulationState) => {
     state = next;
     persistState(state);
     const touchUiActive = shouldUseTouchUi();
     renderHud(hudLayer, state);
     renderTouchFeedback(touchLayer, state);
-    renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName, pendingSkillFeedback);
+    rerenderModal();
     modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
     touchLayer.classList.toggle("active", state.run.status === "running" && touchUiActive);
     updateOrientationOverlay(orientationLayer, state.run.status === "running");
@@ -162,10 +172,16 @@ export function createAppShell(root: HTMLElement): void {
       return;
     }
 
+    const supplyButton = target.closest<HTMLElement>("[data-supply]");
+    if (supplyButton) {
+      commandQueue.push({ type: "buy-supply", supplyId: supplyButton.dataset.supply as PreRunSupplyId });
+      return;
+    }
+
     const weaponButton = target.closest<HTMLElement>("[data-weapon]");
     if (weaponButton) {
       selectedWeapon = weaponButton.dataset.weapon as WeaponId;
-      renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName, pendingSkillFeedback);
+      rerenderModal();
       modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
     }
   });
@@ -536,12 +552,17 @@ function renderModal(
             }
           </section>
         </div>
+        ${renderPreRunSupplies(state)}
         <section class="panel menu-section leaderboard-section">
-          <div class="section-header">
-            <span class="label">排行榜</span>
-            <strong>本机最高回收记录</strong>
-          </div>
-          ${renderLeaderboard(state.meta.leaderboard)}
+          <details class="leaderboard-fold">
+            <summary class="leaderboard-fold-summary">
+              <div class="section-header">
+                <span class="label">排行榜</span>
+                <strong>本机最高回收记录</strong>
+              </div>
+            </summary>
+            ${renderLeaderboard(state.meta.leaderboard)}
+          </details>
         </section>
         <section class="panel menu-section leaderboard-section">
           <div class="section-header">
@@ -711,6 +732,52 @@ function renderWeaponCard(weaponId: WeaponId, selectedWeapon: WeaponId): string 
       <p>${weapon.description}</p>
       <div class="tag-row">${weapon.traits.map((trait) => `<span class="tag">${trait}</span>`).join("")}</div>
     </button>
+  `;
+}
+
+function renderPreRunSupplies(state: SimulationState): string {
+  const stocked = preRunSupplyDefinitions.filter((supply) => (state.meta.supplyInventory[supply.id] ?? 0) > 0);
+
+  return `
+    <section class="panel menu-section">
+      <div class="section-header">
+        <span class="label">起始补给</span>
+        <strong>用积分换开局底子</strong>
+      </div>
+      <p class="body-copy">补给只在开局生效，每局开始时自动消耗 1 份，不改变整局上限，只帮你把前期站稳。</p>
+      ${
+        stocked.length > 0
+          ? `<div class="build-pill-row">${stocked
+              .map((supply) => `<span class="build-pill">${supply.name} x${state.meta.supplyInventory[supply.id] ?? 0}</span>`)
+              .join("")}</div>`
+          : `<p class="body-copy">当前没有库存。先备货，下一局开始时会自动结算并生效。</p>`
+      }
+      <div class="card-grid">
+        ${preRunSupplyDefinitions
+          .map((supply) => {
+            const stock = state.meta.supplyInventory[supply.id] ?? 0;
+            const full = stock >= supply.maxStock;
+            const afford = state.meta.credits >= supply.cost;
+            const disabled = full || !afford;
+            const footer = full ? `库存已满 ${stock}/${supply.maxStock}` : afford ? `${supply.cost} 积分` : `需要 ${supply.cost} 积分`;
+            return `
+              <div class="meta-card">
+                <h3>${supply.name}</h3>
+                <p>${supply.description}</p>
+                <footer>${footer}</footer>
+                <div class="stat-ribbon">
+                  <span>库存 ${stock}/${supply.maxStock}</span>
+                  <span>开局自动消耗</span>
+                </div>
+                <div class="button-row">
+                  <button type="button" class="button" data-supply="${supply.id}" ${disabled ? "disabled" : ""}>${full ? "已备满" : "购买补给"}</button>
+                </div>
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    </section>
   `;
 }
 

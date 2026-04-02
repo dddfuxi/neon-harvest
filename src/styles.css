@@ -648,6 +648,24 @@ body {
   margin-top: 18px;
 }
 
+.leaderboard-fold {
+  display: grid;
+  gap: 12px;
+}
+
+.leaderboard-fold-summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.leaderboard-fold-summary::-webkit-details-marker {
+  display: none;
+}
+
+.leaderboard-fold-summary .section-header {
+  margin: 0;
+}
+
 .leaderboard-list {
   display: grid;
   gap: 10px;

@@ -4,7 +4,7 @@ import type { EnemyType } from "../content/enemies";
 import { weaponDefinitions, type WeaponId } from "../content/weapons";
 import type { InputSnapshot } from "../input/actions";
 import { add, clamp, distance, fromAngle, normalize, scale, subtract } from "./math";
-import { buyMetaUpgrade } from "./meta";
+import { buyMetaUpgrade, buyPreRunSupply } from "./meta";
 import { randomChoice, randomFloat } from "./random";
 import { createRunState } from "./state";
 import type {
@@ -31,7 +31,8 @@ export type UiCommand =
   | { type: "choose-upgrade"; upgradeId: UpgradeId }
   | { type: "enter-meta" }
   | { type: "exit-meta" }
-  | { type: "buy-meta"; upgradeId: string };
+  | { type: "buy-meta"; upgradeId: string }
+  | { type: "buy-supply"; supplyId: "weapon-oil" | "shield-pack" | "field-notes" | "emergency-repair" | "risk-protocol" };
 
 export function updateSimulation(
   previous: SimulationState,
@@ -182,6 +183,8 @@ function applyCommand(state: SimulationState, command: UiCommand): SimulationSta
       return { ...state, run: { ...state.run, status: "menu" } };
     case "buy-meta":
       return { ...state, meta: buyMetaUpgrade(state.meta, command.upgradeId) };
+    case "buy-supply":
+      return { ...state, meta: buyPreRunSupply(state.meta, command.supplyId) };
     default:
       return state;
   }
@@ -496,13 +499,29 @@ function spawnEnemies(state: SimulationState, deltaSeconds: number): SimulationS
   const bossActive = state.run.enemies.some((enemy) => enemy.type === "boss");
   const earlyPenalty = state.run.time < 45 ? 2 : state.run.time < 90 ? 1 : 0;
   const stagePressure = Math.floor((state.run.objective.stage - 1) / 3);
+  const riskPressure = state.run.riskProtocolTier * 1.25;
   const themeCountBonus = state.run.stageTheme === "siege" ? 2 : state.run.stageTheme === "crossfire" ? 1 : 0;
   const desiredCount = Math.max(
     2,
-    Math.floor((bossActive ? 2 : 4) + state.run.time / 14 + state.run.unbankedShards / 55 + stagePressure * 1.5 + themeCountBonus - earlyPenalty)
+    Math.floor(
+      (bossActive ? 2 : 4) +
+        state.run.time / 14 +
+        state.run.unbankedShards / 55 +
+        stagePressure * 1.5 +
+        themeCountBonus +
+        riskPressure -
+        earlyPenalty
+    )
   );
   const themeRateBonus = state.run.stageTheme === "siege" ? 0.26 : state.run.stageTheme === "crossfire" ? 0.14 : 0;
-  const spawnRate = clamp((state.run.time < 75 ? 0.72 + state.run.time / 120 : 1.3 + state.run.time / 55) + stagePressure * 0.18 + themeRateBonus, 0.72, 7.2);
+  const spawnRate = clamp(
+    (state.run.time < 75 ? 0.72 + state.run.time / 120 : 1.3 + state.run.time / 55) +
+      stagePressure * 0.18 +
+      themeRateBonus +
+      state.run.riskProtocolTier * 0.22,
+    0.72,
+    7.2
+  );
   const spawnInterval = 1 / spawnRate;
   let accumulator = state.run.spawnAccumulator + deltaSeconds;
   let next = state;
@@ -542,7 +561,7 @@ function spawnSingleEnemy(state: SimulationState): SimulationState {
 
   const eliteUnlocked = state.run.time > 150;
   const eliteModifier = eliteUnlocked && modifierRoll.value > 0.84 ? (modifierRoll.value > 0.92 ? "volatile" : "fast") : null;
-  const hpBonus = eliteModifier ? 1.35 : 1;
+  const hpBonus = (eliteModifier ? 1.35 : 1) * (1 + state.run.riskProtocolTier * 0.12);
   const color = eliteModifier === "volatile" ? 0xffe670 : definition.color;
   const enemy: EnemyState = {
     id: `e-${state.nextId}`,
@@ -584,7 +603,7 @@ function spawnBoss(
   const angle = angleRoll.value * Math.PI * 2;
   const position = add(state.run.player.position, scale(fromAngle(angle), 420));
   const radiusScale = (pattern === "artillery" ? 1.42 : 1.28) * (options?.radiusMultiplier ?? 1);
-  const hpScale = (pattern === "artillery" ? 1.14 : 1.06) * (options?.hpMultiplier ?? 1);
+  const hpScale = (pattern === "artillery" ? 1.14 : 1.06) * (options?.hpMultiplier ?? 1) * (1 + state.run.riskProtocolTier * 0.16);
   const enemy: EnemyState = {
     id: `e-${state.nextId}`,
     type: "boss",
@@ -622,8 +641,10 @@ function maybeAddHazards(state: SimulationState): SimulationState {
     return state;
   }
 
-  const hazardRadiusBonus = state.run.stageTheme === "siege" ? 18 : state.run.stageTheme === "crossfire" ? -6 : 0;
-  const hazardDamageBonus = state.run.stageTheme === "siege" ? 4 : state.run.stageTheme === "crossfire" ? 2 : 0;
+  const hazardRadiusBonus =
+    (state.run.stageTheme === "siege" ? 18 : state.run.stageTheme === "crossfire" ? -6 : 0) + state.run.riskProtocolTier * 8;
+  const hazardDamageBonus =
+    (state.run.stageTheme === "siege" ? 4 : state.run.stageTheme === "crossfire" ? 2 : 0) + state.run.riskProtocolTier * 3;
 
   const hazard: HazardState = {
     id: `h-${state.nextId}`,
@@ -1215,7 +1236,7 @@ function updateExtraction(state: SimulationState, deltaSeconds: number, input: I
     return state;
   }
 
-  extraction.rewardMultiplier = 1 + clamp((state.run.time - 480) / 120, 0, 0.85);
+  extraction.rewardMultiplier = 1 + clamp((state.run.time - 480) / 120, 0, 0.85) + state.run.riskProtocolTier * 0.32;
   const insideZone = distance(state.run.player.position, extraction.zoneCenter) <= extraction.radius;
   extraction.active = insideZone && input.interact;
   extraction.holdTimer = extraction.active ? extraction.holdTimer + deltaSeconds : Math.max(0, extraction.holdTimer - deltaSeconds * 1.5);
@@ -1562,11 +1583,31 @@ function checkDefeat(state: SimulationState): SimulationState {
   if (state.run.player.hp > 0) {
     return state;
   }
+  if (state.run.emergencyRepairCharges > 0) {
+    return {
+      ...state,
+      nextId: state.nextId + 1,
+      run: {
+        ...state.run,
+        emergencyRepairCharges: state.run.emergencyRepairCharges - 1,
+        player: {
+          ...state.run.player,
+          hp: Math.max(48, Math.round(state.run.player.maxHp * 0.42)),
+          shield: Math.max(24, Math.round(state.run.player.maxShield * 0.36)),
+          shieldRegenDelay: 2.4
+        },
+        lastDamageSource: "应急修复已触发",
+        tutorialHint: "应急修复单元已自动介入，立刻脱离当前火线。",
+        announcement: createAnnouncement(state.nextId, "应急修复", "机体已被紧急拉回安全线，但本局只会触发这一次。", "upgrade", 3.4),
+        screenFlash: 1
+      }
+    };
+  }
   return endRun(state, "dead");
 }
 
 function endRun(state: SimulationState, result: RunSummary["result"]): SimulationState {
-  const extractionBonus = result === "extracted" ? state.run.extraction.rewardMultiplier : 0.55;
+  const extractionBonus = (result === "extracted" ? state.run.extraction.rewardMultiplier : 0.55) * (1 + state.run.riskProtocolTier * 0.28);
   const payout = Math.round(state.run.unbankedShards * extractionBonus * (result === "extracted" ? state.run.player.economyMultiplier : 0.45));
   const objectivesCompleted = Math.max(0, state.run.objective.stage - 1 + (state.run.objective.completed ? 1 : 0));
   const keyUpgradeIds = state.run.appliedUpgrades.filter((upgradeId) => upgradeId !== "weapon-tuning");
@@ -1576,8 +1617,8 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     .filter((title): title is string => Boolean(title));
   const buildRecap =
     keyUpgradeTitles.length > 0
-      ? `武器 Lv.${state.run.player.weaponLevel} · 关键升级：${keyUpgradeTitles.join(" / ")}`
-      : `武器 Lv.${state.run.player.weaponLevel} · 本轮主要依靠基础火力推进`;
+      ? `武器 Lv.${state.run.player.weaponLevel}${state.run.riskProtocolTier > 0 ? " · 风险协议已启用" : ""} · 关键升级：${keyUpgradeTitles.join(" / ")}`
+      : `武器 Lv.${state.run.player.weaponLevel}${state.run.riskProtocolTier > 0 ? " · 风险协议已启用" : ""} · 本轮主要依靠基础火力推进`;
   const deathReason =
     result === "extracted" ? "成功撤离，结算完成" : state.run.lastDamageSource || "在持续交火中被压垮";
   const summary: RunSummary = {
@@ -1586,6 +1627,7 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     level: state.run.player.xpLevel,
     weaponId: state.run.player.weaponId,
     weaponLevel: state.run.player.weaponLevel,
+    riskProtocolTier: state.run.riskProtocolTier,
     shardsBanked: result === "extracted" ? state.run.bankedShards + payout : payout,
     enemiesDestroyed: state.run.enemiesDestroyed,
     objectivesCompleted,
