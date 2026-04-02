@@ -16,6 +16,11 @@ import { loadState, persistState } from "../game/storage/save";
 import type { LeaderboardEntry, SimulationState } from "../game/simulation/types";
 import { createGame } from "../phaser/createGame";
 
+type OnlineRunSession = {
+  sessionId: string;
+  sessionToken: string;
+};
+
 const categoryMap = {
   weapon: "武器",
   survivability: "生存",
@@ -36,6 +41,7 @@ export function createAppShell(root: HTMLElement): void {
   let leaderboardNotice = "";
   let isUploadingScore = false;
   let leaderboardName = window.localStorage.getItem("neon-harvest-player-name") ?? "";
+  let activeRunSession: OnlineRunSession | null = null;
   const commandQueue: UiCommand[] = [];
 
   root.innerHTML = `
@@ -69,8 +75,9 @@ export function createAppShell(root: HTMLElement): void {
     state = next;
     persistState(state);
     renderHud(hudLayer, state);
+    renderTouchFeedback(touchLayer, state);
     renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName);
-    modalLayer.style.pointerEvents = state.run.status === "running" ? "none" : "auto";
+    modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
     touchLayer.classList.toggle("active", state.run.status === "running");
     updateOrientationOverlay(orientationLayer, state.run.status === "running");
   };
@@ -109,6 +116,7 @@ export function createAppShell(root: HTMLElement): void {
     if (commandButton) {
       const command = commandButton.dataset.command!;
       if (command === "start-run") {
+        void beginOnlineRunSession(selectedWeapon);
         commandQueue.push({ type: "start-run", weaponId: selectedWeapon });
       } else if (command === "enter-meta") {
         commandQueue.push({ type: "enter-meta" });
@@ -143,7 +151,7 @@ export function createAppShell(root: HTMLElement): void {
     if (weaponButton) {
       selectedWeapon = weaponButton.dataset.weapon as WeaponId;
       renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName);
-      modalLayer.style.pointerEvents = state.run.status === "running" ? "none" : "auto";
+      modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
     }
   });
 
@@ -173,11 +181,77 @@ export function createAppShell(root: HTMLElement): void {
     }
   }
 
+  async function beginOnlineRunSession(weaponId: WeaponId): Promise<void> {
+    activeRunSession = null;
+    try {
+      const response = await fetch("/api/leaderboard", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: "start",
+          weaponId
+        })
+      });
+      const payload = (await response.json()) as { sessionId?: string; sessionToken?: string; error?: string };
+      if (response.ok && payload.sessionId && payload.sessionToken) {
+        activeRunSession = {
+          sessionId: payload.sessionId,
+          sessionToken: payload.sessionToken
+        };
+        leaderboardNotice = "";
+        return;
+      }
+      leaderboardNotice = payload.error ?? "在线排行榜会话创建失败";
+    } catch {
+      leaderboardNotice = "在线排行榜会话创建失败";
+    }
+  }
+
   async function uploadLatestScore(): Promise<void> {
     const summary = state.meta.lastRunSummary ?? state.run.runSummary;
     if (!summary || isUploadingScore) {
       return;
     }
+    if (!activeRunSession) {
+      leaderboardNotice = "本局未建立在线会话，无法上传战绩";
+      renderAll(state);
+      return;
+    }
+
+    isUploadingScore = true;
+    leaderboardNotice = "正在上传战绩...";
+    renderAll(state);
+
+    try {
+      const response = await fetch("/api/leaderboard", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: "submit",
+          sessionId: activeRunSession.sessionId,
+          sessionToken: activeRunSession.sessionToken,
+          playerName: leaderboardName.trim() || "匿名回收员",
+          summary
+        })
+      });
+      const result = (await response.json()) as { entries?: LeaderboardEntry[]; error?: string };
+      onlineLeaderboard = Array.isArray(result.entries) ? result.entries : onlineLeaderboard;
+      leaderboardNotice = result.error ?? (response.ok ? "战绩已上传到在线排行榜" : "上传失败");
+      if (response.ok) {
+        activeRunSession = null;
+      }
+    } catch {
+      leaderboardNotice = "上传失败，请稍后重试";
+    } finally {
+      isUploadingScore = false;
+      renderAll(state);
+    }
+    return;
+    /*
 
     isUploadingScore = true;
     leaderboardNotice = "正在上传战绩...";
@@ -212,10 +286,16 @@ export function createAppShell(root: HTMLElement): void {
       isUploadingScore = false;
       renderAll(state);
     }
+    */
   }
 }
 
 function renderHud(container: HTMLElement, state: SimulationState): void {
+  if (state.run.status === "menu" || state.run.status === "meta") {
+    container.innerHTML = "";
+    return;
+  }
+
   const shieldPercent = Math.max(0, (state.run.player.shield / state.run.player.maxShield) * 100);
   const hullPercent = Math.max(0, (state.run.player.hp / state.run.player.maxHp) * 100);
   const dashPercent =
@@ -229,8 +309,45 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
   const runSeconds = Math.floor(state.run.time % 60)
     .toString()
     .padStart(2, "0");
+  if (isMobileLandscapeHud()) {
+    container.innerHTML = `
+      ${
+        state.run.announcement
+          ? `<div class="announcement-banner tone-${state.run.announcement.tone}">
+              <strong>${state.run.announcement.title}</strong>
+              <span>${state.run.announcement.subtitle}</span>
+            </div>`
+          : ""
+      }
+      <div class="mobile-hud">
+        <div class="panel mobile-vitals">
+          <div class="mobile-bar-group">
+            <span class="label">护盾</span>
+            <div class="progress compact"><span style="width:${shieldPercent}%"></span></div>
+          </div>
+          <div class="mobile-bar-group">
+            <span class="label">机体</span>
+            <div class="progress compact hull"><span style="width:${hullPercent}%"></span></div>
+          </div>
+        </div>
+        <div class="panel mobile-runtime">
+          <div class="mobile-runtime-main">${runMinutes}:${runSeconds}</div>
+          <div class="body-copy">${characterSkillDefinitions[state.run.player.characterSkillId].name}</div>
+        </div>
+      </div>
+    `;
+    return;
+  }
 
   container.innerHTML = `
+    ${
+      state.run.announcement
+        ? `<div class="announcement-banner tone-${state.run.announcement.tone}">
+            <strong>${state.run.announcement.title}</strong>
+            <span>${state.run.announcement.subtitle}</span>
+          </div>`
+        : ""
+    }
     <div class="hud-top">
       <div class="hud-cluster">
         ${card("护盾", `${Math.max(0, Math.ceil(state.run.player.shield))}<small> / ${state.run.player.maxShield}</small>`, shieldPercent)}
@@ -272,6 +389,11 @@ function renderModal(
 ): void {
   const summary = state.meta.lastRunSummary ?? state.run.runSummary;
   const weapon = weaponDefinitions[selectedWeapon];
+
+  if (isDeathTransitionActive(state)) {
+    container.innerHTML = "";
+    return;
+  }
 
   if (state.run.status === "menu") {
     container.innerHTML = `
@@ -601,13 +723,31 @@ function card(labelText: string, valueText: string, percent?: number): string {
 }
 
 function renderSummary(summary: NonNullable<SimulationState["meta"]["lastRunSummary"]>): string {
+  const weapon = weaponDefinitions[summary.weaponId] ?? weaponDefinitions["pulse-blaster"];
+  const minutes = Math.floor(summary.duration / 60)
+    .toString()
+    .padStart(2, "0");
+  const seconds = Math.floor(summary.duration % 60)
+    .toString()
+    .padStart(2, "0");
+  const keyUpgradeTags = ((summary.keyUpgrades ?? []).length > 0 ? summary.keyUpgrades : ["基础火力推进"])
+    .map((upgrade) => `<span class="tag">${upgrade}</span>`)
+    .join("");
   return `
     <div class="summary-grid">
       <div class="panel"><span class="label">结果</span><div class="value">${translateResult(summary.result)}</div></div>
-      <div class="panel"><span class="label">时长</span><div class="value">${Math.floor(summary.duration / 60)} 分</div></div>
-      <div class="panel"><span class="label">等级</span><div class="value">${summary.level}</div></div>
-      <div class="panel"><span class="label">击毁数</span><div class="value">${summary.enemiesDestroyed}</div></div>
-      <div class="panel"><span class="label">带回积分</span><div class="value">${summary.shardsBanked}</div></div>
+      <div class="panel"><span class="label">本轮武器</span><div class="value">${weapon.name}<small> / Lv.${summary.weaponLevel ?? 1}</small></div></div>
+      <div class="panel"><span class="label">存活时间</span><div class="value">${minutes}:${seconds}</div></div>
+      <div class="panel"><span class="label">到达阶段</span><div class="value">第 ${summary.highestStage ?? 1} 阶段</div></div>
+      <div class="panel"><span class="label">完成任务数</span><div class="value">${summary.objectivesCompleted ?? 0}</div></div>
+      <div class="panel"><span class="label">击杀数</span><div class="value">${summary.enemiesDestroyed}</div></div>
+      <div class="panel"><span class="label">回收积分</span><div class="value">${summary.shardsBanked}</div></div>
+      <div class="panel"><span class="label">失败点</span><div class="value">${summary.deathReason ?? "未记录"}</div></div>
+    </div>
+    <div class="panel recap-card">
+      <span class="label">本轮构筑回顾</span>
+      <div class="body-copy">${summary.buildRecap ?? "本轮记录来自旧版本存档。"}</div>
+      <div class="tag-row">${keyUpgradeTags}</div>
     </div>
   `;
 }
@@ -695,6 +835,10 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
+function isDeathTransitionActive(state: SimulationState): boolean {
+  return state.run.status === "run-over" && state.run.runSummary?.result === "dead" && state.run.runOverDelay > 0;
+}
+
 function translateResult(result: "dead" | "extracted"): string {
   return result === "extracted" ? "成功撤离" : "战败";
 }
@@ -730,9 +874,9 @@ function setupTouchControls(container: HTMLElement): void {
       <span class="touch-caption">瞄准 / 射击</span>
     </div>
     <div class="touch-buttons">
-      <button type="button" class="touch-button" data-touch="dash">冲刺</button>
-      <button type="button" class="touch-button" data-touch="interact">撤离</button>
-      <button type="button" class="touch-button" data-touch="pause">暂停</button>
+      <button type="button" class="touch-button" data-touch="dash" data-touch-button="dash"><span class="touch-button-fill"></span><span class="touch-button-text">冲刺</span></button>
+      <button type="button" class="touch-button" data-touch="interact" data-touch-button="interact"><span class="touch-button-fill"></span><span class="touch-button-text">撤离</span></button>
+      <button type="button" class="touch-button" data-touch="pause" data-touch-button="pause"><span class="touch-button-fill"></span><span class="touch-button-text">暂停</span></button>
     </div>
   `;
 
@@ -834,6 +978,17 @@ function setupTouchControls(container: HTMLElement): void {
     }
   });
 
+  container.addEventListener("pointerdown", (event) => {
+    const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-touch-button]");
+    target?.classList.add("pressed");
+  });
+  const clearPressed = (event: Event) => {
+    const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-touch-button]");
+    target?.classList.remove("pressed");
+  };
+  container.addEventListener("pointerup", clearPressed);
+  container.addEventListener("pointercancel", clearPressed);
+
   const interactButton = container.querySelector<HTMLElement>("[data-touch='interact']")!;
   interactButton.addEventListener("pointerdown", () => {
     setVirtualControlsEnabled(true);
@@ -857,6 +1012,32 @@ function normalizeVector(vector: { x: number; y: number }): { x: number; y: numb
     x: (vector.x / length) * scale,
     y: (vector.y / length) * scale
   };
+}
+
+function renderTouchFeedback(container: HTMLElement, state: SimulationState): void {
+  if (state.run.status !== "running") {
+    for (const button of container.querySelectorAll<HTMLElement>("[data-touch-button]")) {
+      button.style.setProperty("--cooldown-fill", "1");
+      button.classList.remove("ready", "pressed");
+    }
+    return;
+  }
+
+  const dashButton = container.querySelector<HTMLElement>("[data-touch-button='dash']");
+  const interactButton = container.querySelector<HTMLElement>("[data-touch-button='interact']");
+  const pauseButton = container.querySelector<HTMLElement>("[data-touch-button='pause']");
+  const dashRatio =
+    state.run.player.dashTimer <= 0 ? 1 : Math.max(0, 1 - state.run.player.dashTimer / Math.max(0.001, state.run.player.dashCooldown));
+
+  dashButton?.style.setProperty("--cooldown-fill", `${dashRatio}`);
+  dashButton?.classList.toggle("ready", dashRatio >= 0.995);
+  interactButton?.style.setProperty("--cooldown-fill", state.run.extraction.unlocked ? "1" : "0.22");
+  interactButton?.classList.toggle("ready", state.run.extraction.unlocked);
+  pauseButton?.style.setProperty("--cooldown-fill", "1");
+}
+
+function isMobileLandscapeHud(): boolean {
+  return window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(orientation: landscape)").matches;
 }
 
 function updateOrientationOverlay(container: HTMLElement, isRunning: boolean): void {

@@ -17,9 +17,12 @@ export type SceneCallbacks = {
 
 type SpriteRegistry = {
   background?: Phaser.GameObjects.TileSprite;
+  themeLayer?: Phaser.GameObjects.TileSprite;
+  themeWash?: Phaser.GameObjects.Rectangle;
   visionOverlay?: Phaser.GameObjects.RenderTexture;
   visionMask?: Phaser.GameObjects.Image;
   bossAlertFrame?: Phaser.GameObjects.Graphics;
+  bossTelegraphs?: Phaser.GameObjects.Graphics;
   enemyIndicators?: Phaser.GameObjects.Graphics;
   player?: Phaser.GameObjects.Sprite;
   playerShield?: Phaser.GameObjects.Arc;
@@ -37,7 +40,10 @@ export class GameScene extends Phaser.Scene {
   private previousRunStatus: SimulationState["run"]["status"] | null = null;
   private previousPlayerPosition: { x: number; y: number } | null = null;
   private previousDashTimer = 0;
+  private objectivePauseTimer = 0;
   private deathFxObjects: Phaser.GameObjects.GameObject[] = [];
+  private seenHitEffectIds = new Set<string>();
+  private previousAnnouncementId: string | null = null;
   private registryView: SpriteRegistry = {
     obstacles: new Map(),
     hazards: new Map(),
@@ -63,6 +69,17 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setScrollFactor(0)
       .setDepth(0);
+    this.registryView.themeLayer = this.add
+      .tileSprite(0, 0, this.scale.width, this.scale.height, "bg/theme-skirmish")
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(0.2)
+      .setAlpha(0.42);
+    this.registryView.themeWash = this.add
+      .rectangle(0, 0, this.scale.width, this.scale.height, 0x6cf3ff, 0.06)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(0.25);
     this.registryView.visionOverlay = this.add
       .renderTexture(0, 0, this.scale.width, this.scale.height)
       .setOrigin(0, 0)
@@ -74,9 +91,10 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setVisible(false);
     this.registryView.bossAlertFrame = this.add.graphics().setScrollFactor(0).setDepth(9).setVisible(false);
+    this.registryView.bossTelegraphs = this.add.graphics().setDepth(5.6);
     this.registryView.enemyIndicators = this.add.graphics().setScrollFactor(0).setDepth(8.6);
 
-    this.registryView.player = this.add.sprite(640, 360, "player/hull").setDepth(5);
+    this.registryView.player = this.add.sprite(640, 360, getPlayerTextureKey("pulse-blaster")).setDepth(5);
     this.registryView.playerShield = this.add.circle(640, 360, 24).setStrokeStyle(3, 0x6cf3ff, 0.75).setFillStyle(0x6cf3ff, 0.05).setDepth(4.5);
     this.registryView.extraction = this.add.sprite(1100, 110, "fx/extraction").setAlpha(0.35).setVisible(false);
 
@@ -87,10 +105,17 @@ export class GameScene extends Phaser.Scene {
 
   update(_: number, delta: number): void {
     const current = this.callbacks.getState();
+    if (this.objectivePauseTimer > 0) {
+      this.objectivePauseTimer = Math.max(0, this.objectivePauseTimer - delta);
+      this.handleRunTransitions(current);
+      this.renderState(current);
+      return;
+    }
+
     const commands = this.callbacks.flushCommands();
     const input =
       this.inputController && current.run.status === "running"
-        ? this.inputController.snapshot(current.run.player.position.x, current.run.player.position.y)
+        ? this.inputController.snapshot(current.run.player.position.x, current.run.player.position.y, current.run.enemies)
         : createEmptyInput();
 
     if (input.pause && current.run.status === "running") {
@@ -102,6 +127,9 @@ export class GameScene extends Phaser.Scene {
       this.callbacks.setState(next);
       this.callbacks.onStateChange(next);
     }
+    if (!current.run.objective.completed && next.run.objective.completed) {
+      this.playObjectiveCompleteSequence(next);
+    }
     this.handleRunTransitions(next);
     this.renderState(next);
   }
@@ -109,14 +137,21 @@ export class GameScene extends Phaser.Scene {
   private handleResize(): void {
     const camera = this.cameras.main;
     camera.setViewport(0, 0, this.scale.width, this.scale.height);
-    camera.setZoom(Math.min(this.scale.width / 1280, this.scale.height / 720));
+    const baseZoom = Math.min(this.scale.width / 1280, this.scale.height / 720);
+    const isMobileLandscape =
+      window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(orientation: landscape)").matches;
+    camera.setZoom(isMobileLandscape ? baseZoom * 0.9 : baseZoom);
     this.registryView.background?.setSize(this.scale.width, this.scale.height);
+    this.registryView.themeLayer?.setSize(this.scale.width, this.scale.height);
+    this.registryView.themeWash?.setSize(this.scale.width, this.scale.height);
     this.registryView.visionOverlay?.setSize(this.scale.width, this.scale.height);
     this.renderBossAlertFrame(this.callbacks.getState());
   }
 
   private renderState(state: SimulationState): void {
     const background = this.registryView.background!;
+    const themeLayer = this.registryView.themeLayer!;
+    const themeWash = this.registryView.themeWash!;
     const playerSprite = this.registryView.player!;
     const playerShield = this.registryView.playerShield!;
     this.maybeSpawnDashAfterimages(state);
@@ -127,15 +162,20 @@ export class GameScene extends Phaser.Scene {
       : { x: state.run.player.velocity.x || 1, y: state.run.player.velocity.y || 0.01 };
     playerSprite.setRotation(Math.atan2(facing.y, facing.x));
     playerSprite.setScale(1 + state.run.screenFlash * 0.05);
+    const weaponTint = weaponDefinitions[state.run.player.weaponId].color;
+    playerSprite.setTexture(getPlayerTextureKey(state.run.player.weaponId));
     const shieldRatio = Math.max(0, state.run.player.shield / state.run.player.maxShield);
     playerShield.setPosition(state.run.player.position.x, state.run.player.position.y);
     playerShield.setRadius(20 + shieldRatio * 10 + Math.sin(this.time.now / 90) * 1.5);
-    playerShield.setStrokeStyle(2 + shieldRatio * 2, 0x6cf3ff, 0.3 + shieldRatio * 0.55);
-    playerShield.setFillStyle(0x6cf3ff, 0.03 + shieldRatio * 0.08);
+    playerShield.setStrokeStyle(2 + shieldRatio * 2, weaponTint, 0.3 + shieldRatio * 0.55);
+    playerShield.setFillStyle(weaponTint, 0.03 + shieldRatio * 0.08);
     playerShield.setVisible(shieldRatio > 0.02);
     this.cameras.main.centerOn(state.run.player.position.x, state.run.player.position.y);
     background.tilePositionX = state.run.player.position.x - this.scale.width * 0.5;
     background.tilePositionY = state.run.player.position.y - this.scale.height * 0.5;
+    themeLayer.tilePositionX = state.run.player.position.x * 0.35;
+    themeLayer.tilePositionY = state.run.player.position.y * 0.35;
+    this.applyStageTheme(state, themeLayer, themeWash);
 
     this.cameras.main.setAlpha(1 - state.run.screenFlash * 0.12);
     if (state.run.screenFlash > 0.8) {
@@ -247,8 +287,10 @@ export class GameScene extends Phaser.Scene {
       this.registryView.shards
     );
 
-    const tint = weaponDefinitions[state.run.player.weaponId].color;
-    playerSprite.setTint(tint);
+    playerSprite.setTint(0xffffff);
+    this.spawnHitEffects(state);
+    this.playAnnouncementPulse(state);
+    this.renderBossTelegraphs(state);
     this.renderVisionOverlay(state);
     this.renderEnemyIndicators(state);
     this.renderBossAlertFrame(state);
@@ -277,7 +319,6 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    const tint = weaponDefinitions[state.run.player.weaponId].color;
     const angle = Math.atan2(
       state.run.player.position.y - this.previousPlayerPosition.y,
       state.run.player.position.x - this.previousPlayerPosition.x
@@ -288,11 +329,11 @@ export class GameScene extends Phaser.Scene {
       const progress = index / Math.max(1, ghostCount - 1);
       const x = Phaser.Math.Linear(state.run.player.position.x, this.previousPlayerPosition.x, progress);
       const y = Phaser.Math.Linear(state.run.player.position.y, this.previousPlayerPosition.y, progress);
-      const ghost = this.add
-        .sprite(x, y, "player/hull")
-        .setDepth(4.7 - progress * 0.1)
-        .setTint(tint)
-        .setRotation(angle)
+        const ghost = this.add
+        .sprite(x, y, getPlayerTextureKey(state.run.player.weaponId))
+          .setDepth(4.7 - progress * 0.1)
+        .setTint(0xffffff)
+          .setRotation(angle)
         .setScale(1.05 - progress * 0.12)
         .setAlpha(0.32 - progress * 0.2)
         .setBlendMode(Phaser.BlendModes.ADD);
@@ -308,6 +349,27 @@ export class GameScene extends Phaser.Scene {
         }
       });
     }
+  }
+
+  private playObjectiveCompleteSequence(_: SimulationState): void {
+    this.objectivePauseTimer = 220;
+    this.cameras.main.flash(170, 212, 255, 99, false);
+    this.cameras.main.shake(140, 0.0022);
+    if (this.sound.get("ui/objective-complete")) {
+      this.sound.play("ui/objective-complete");
+    }
+
+    const centerX = this.scale.width * 0.5;
+    const centerY = this.scale.height * 0.24;
+    const ring = this.add.circle(centerX, centerY, 24, 0xd4ff63, 0.12).setScrollFactor(0).setDepth(9.5);
+    this.tweens.add({
+      targets: ring,
+      radius: 180,
+      alpha: 0,
+      duration: 420,
+      ease: "Cubic.easeOut",
+      onComplete: () => ring.destroy()
+    });
   }
 
   private handleRunTransitions(state: SimulationState): void {
@@ -342,8 +404,9 @@ export class GameScene extends Phaser.Scene {
 
     playerShield.setVisible(false);
     playerSprite.setAlpha(0.08);
-    this.cameras.main.shake(220, 0.006);
-    this.cameras.main.zoomTo(this.cameras.main.zoom * 1.06, 220);
+    this.cameras.main.flash(120, 255, 255, 255, false);
+    this.cameras.main.shake(460, 0.0065);
+    this.cameras.main.zoomTo(this.cameras.main.zoom * 1.08, 1000);
 
     const flash = this.add.circle(center.x, center.y, 14, 0xffffff, 0.9).setDepth(6.2);
     this.deathFxObjects.push(flash);
@@ -355,7 +418,7 @@ export class GameScene extends Phaser.Scene {
       ease: "Quad.easeOut"
     });
 
-    const particleCount = 30;
+    const particleCount = 42;
     for (let index = 0; index < particleCount; index += 1) {
       const angle = (Math.PI * 2 * index) / particleCount + Phaser.Math.FloatBetween(-0.08, 0.08);
       const distance = Phaser.Math.Between(56, 180);
@@ -377,7 +440,7 @@ export class GameScene extends Phaser.Scene {
     this.deathFxObjects.push(halo);
     this.tweens.add({
       targets: halo,
-      radius: 170,
+      radius: 210,
       alpha: 0,
       duration: 1000,
       ease: "Sine.easeOut",
@@ -387,6 +450,27 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
+  private applyStageTheme(
+    state: SimulationState,
+    themeLayer: Phaser.GameObjects.TileSprite,
+    themeWash: Phaser.GameObjects.Rectangle
+  ): void {
+    if (state.run.stageTheme === "crossfire") {
+      themeLayer.setTexture("bg/theme-crossfire").setAlpha(0.46);
+      themeWash.setFillStyle(0x7f9dff, 0.08);
+      return;
+    }
+
+    if (state.run.stageTheme === "siege") {
+      themeLayer.setTexture("bg/theme-siege").setAlpha(0.52);
+      themeWash.setFillStyle(0xff9c47, 0.09);
+      return;
+    }
+
+    themeLayer.setTexture("bg/theme-skirmish").setAlpha(0.38);
+    themeWash.setFillStyle(0x6cf3ff, 0.06);
+  }
+
   private clearDeathSequence(): void {
     for (const object of this.deathFxObjects) {
       object.destroy();
@@ -394,7 +478,10 @@ export class GameScene extends Phaser.Scene {
     this.deathFxObjects = [];
     this.registryView.player?.setAlpha(1);
     this.registryView.playerShield?.setVisible(true);
-    this.cameras.main.setZoom(Math.min(this.scale.width / 1280, this.scale.height / 720));
+    const baseZoom = Math.min(this.scale.width / 1280, this.scale.height / 720);
+    const isMobileLandscape =
+      window.matchMedia("(pointer: coarse)").matches && window.matchMedia("(orientation: landscape)").matches;
+    this.cameras.main.setZoom(isMobileLandscape ? baseZoom * 0.9 : baseZoom);
     this.previousPlayerPosition = null;
     this.previousDashTimer = 0;
   }
@@ -448,6 +535,78 @@ export class GameScene extends Phaser.Scene {
     frame.strokeRect(11, 11, this.scale.width - 22, this.scale.height - 22);
   }
 
+  private renderBossTelegraphs(state: SimulationState): void {
+    const graphics = this.registryView.bossTelegraphs;
+    if (!graphics) {
+      return;
+    }
+
+    graphics.clear();
+    if (state.run.status !== "running" && state.run.status !== "run-over") {
+      return;
+    }
+
+    for (const hazard of state.run.hazards) {
+      if (hazard.source !== "boss" || hazard.telegraphTime <= 0) {
+        continue;
+      }
+
+      const ratio = Phaser.Math.Clamp(hazard.telegraphTime / 1.45, 0, 1);
+      const color = 0xff425d;
+      const pulse = 1 + Math.sin(this.time.now / 70) * 0.04;
+      const shrinkingRadius = hazard.radius * (0.24 + ratio * 0.76) * pulse;
+
+      graphics.lineStyle(2, color, 0.85);
+      graphics.strokeCircle(hazard.position.x, hazard.position.y, hazard.radius);
+      graphics.lineStyle(3, 0xffffff, 0.32 + (1 - ratio) * 0.2);
+      graphics.strokeCircle(hazard.position.x, hazard.position.y, shrinkingRadius);
+      graphics.fillStyle(color, 0.06 + (1 - ratio) * 0.04);
+      graphics.fillCircle(hazard.position.x, hazard.position.y, hazard.radius);
+    }
+
+    for (const enemy of state.run.enemies) {
+      if (enemy.type !== "boss" || enemy.bossPattern !== "charger" || enemy.chargeTimer <= 0) {
+        continue;
+      }
+
+      const directionLength = Math.hypot(enemy.chargeDirection.x, enemy.chargeDirection.y);
+      if (directionLength < 0.001) {
+        continue;
+      }
+
+      const ratio = Phaser.Math.Clamp(enemy.chargeTimer / 1.05, 0, 1);
+      const direction = {
+        x: enemy.chargeDirection.x / directionLength,
+        y: enemy.chargeDirection.y / directionLength
+      };
+      const lineLength = 250 + (1 - ratio) * 80;
+      const start = {
+        x: enemy.position.x + direction.x * (enemy.radius + 18),
+        y: enemy.position.y + direction.y * (enemy.radius + 18)
+      };
+      const end = {
+        x: start.x + direction.x * lineLength,
+        y: start.y + direction.y * lineLength
+      };
+      const side = { x: -direction.y, y: direction.x };
+      const width = 18 + (1 - ratio) * 10;
+
+      graphics.lineStyle(5, 0xff694f, 0.24 + (1 - ratio) * 0.22);
+      graphics.strokeLineShape(new Phaser.Geom.Line(start.x, start.y, end.x, end.y));
+      graphics.fillStyle(0xff694f, 0.12 + (1 - ratio) * 0.08);
+      graphics.beginPath();
+      graphics.moveTo(start.x + side.x * width, start.y + side.y * width);
+      graphics.lineTo(end.x, end.y);
+      graphics.lineTo(start.x - side.x * width, start.y - side.y * width);
+      graphics.closePath();
+      graphics.fillPath();
+
+      const anchorRadius = enemy.radius + 10 + Math.sin(this.time.now / 80) * 2;
+      graphics.lineStyle(3, 0xffffff, 0.26 + (1 - ratio) * 0.18);
+      graphics.strokeCircle(enemy.position.x, enemy.position.y, anchorRadius);
+    }
+  }
+
   private renderEnemyIndicators(state: SimulationState): void {
     const graphics = this.registryView.enemyIndicators;
     if (!graphics) {
@@ -491,6 +650,130 @@ export class GameScene extends Phaser.Scene {
       graphics.fillPath();
       graphics.strokePath();
     }
+  }
+
+  private spawnHitEffects(state: SimulationState): void {
+    const activeIds = new Set(state.run.hitEffects.map((effect) => effect.id));
+    for (const effect of state.run.hitEffects) {
+      if (this.seenHitEffectIds.has(effect.id)) {
+        continue;
+      }
+      this.seenHitEffectIds.add(effect.id);
+      this.playHitEffect(effect);
+    }
+
+    for (const id of [...this.seenHitEffectIds]) {
+      if (!activeIds.has(id)) {
+        this.seenHitEffectIds.delete(id);
+      }
+    }
+  }
+
+  private playHitEffect(effect: SimulationState["run"]["hitEffects"][number]): void {
+    if (effect.kind === "spark") {
+      const rays = 5;
+      for (let index = 0; index < rays; index += 1) {
+        const angle = (Math.PI * 2 * index) / rays + Phaser.Math.FloatBetween(-0.2, 0.2);
+        const ray = this.add
+          .rectangle(effect.position.x, effect.position.y, 18, 3, effect.color, 0.9)
+          .setRotation(angle)
+          .setDepth(6.4);
+        this.tweens.add({
+          targets: ray,
+          x: effect.position.x + Math.cos(angle) * 18,
+          y: effect.position.y + Math.sin(angle) * 18,
+          alpha: 0,
+          scaleX: 0.3,
+          duration: 120,
+          ease: "Quad.easeOut",
+          onComplete: () => ray.destroy()
+        });
+      }
+      return;
+    }
+
+    if (effect.kind === "burst") {
+      const ring = this.add.circle(effect.position.x, effect.position.y, 12, effect.color, 0.24).setDepth(6.35);
+      const flash = this.add.circle(effect.position.x, effect.position.y, 5, 0xffffff, 0.9).setDepth(6.45);
+      this.tweens.add({
+        targets: ring,
+        radius: 46,
+        alpha: 0,
+        duration: 180,
+        ease: "Cubic.easeOut",
+        onComplete: () => ring.destroy()
+      });
+      this.tweens.add({
+        targets: flash,
+        radius: 18,
+        alpha: 0,
+        duration: 130,
+        ease: "Quad.easeOut",
+        onComplete: () => flash.destroy()
+      });
+      return;
+    }
+
+    if (effect.kind === "pierce-trail") {
+      const trail = this.add.rectangle(effect.position.x, effect.position.y, 52, 4, effect.color, 0.45).setDepth(6.3);
+      const glow = this.add.rectangle(effect.position.x, effect.position.y, 24, 2, 0xffffff, 0.8).setDepth(6.4);
+      this.tweens.add({
+        targets: trail,
+        scaleX: 1.45,
+        alpha: 0,
+        duration: 160,
+        ease: "Sine.easeOut",
+        onComplete: () => trail.destroy()
+      });
+      this.tweens.add({
+        targets: glow,
+        scaleX: 1.8,
+        alpha: 0,
+        duration: 110,
+        ease: "Quad.easeOut",
+        onComplete: () => glow.destroy()
+      });
+      return;
+    }
+
+    const pulse = this.add.circle(effect.position.x, effect.position.y, 10, effect.color, 0.16).setDepth(6.35);
+    const crossA = this.add.rectangle(effect.position.x, effect.position.y, 26, 3, 0xffffff, 0.88).setDepth(6.45);
+    const crossB = this.add.rectangle(effect.position.x, effect.position.y, 26, 3, effect.color, 0.88).setDepth(6.45).setRotation(Math.PI / 2);
+    this.tweens.add({
+      targets: [pulse, crossA, crossB],
+      alpha: 0,
+      scaleX: 1.45,
+      scaleY: 1.45,
+      duration: 150,
+      ease: "Quad.easeOut",
+      onComplete: () => {
+        pulse.destroy();
+        crossA.destroy();
+        crossB.destroy();
+      }
+    });
+  }
+
+  private playAnnouncementPulse(state: SimulationState): void {
+    const nextAnnouncementId = state.run.announcement?.id ?? null;
+    if (!nextAnnouncementId || nextAnnouncementId === this.previousAnnouncementId) {
+      this.previousAnnouncementId = nextAnnouncementId;
+      return;
+    }
+
+    const tone = state.run.announcement?.tone ?? "phase";
+    if (tone === "boss") {
+      this.cameras.main.flash(170, 255, 74, 99, false);
+      this.cameras.main.shake(170, 0.0032);
+    } else if (tone === "upgrade") {
+      this.cameras.main.flash(120, 108, 243, 255, false);
+      this.cameras.main.shake(120, 0.0018);
+    } else {
+      this.cameras.main.flash(140, 212, 255, 99, false);
+      this.cameras.main.shake(140, 0.0022);
+    }
+
+    this.previousAnnouncementId = nextAnnouncementId;
   }
 }
 
@@ -648,6 +931,10 @@ function getProjectileRenderStyle(projectile: SimulationState["run"]["projectile
 function getWeaponIdByColor(color: number): keyof typeof weaponDefinitions {
   const matched = Object.values(weaponDefinitions).find((weapon) => weapon.color === color);
   return matched?.id ?? "pulse-blaster";
+}
+
+function getPlayerTextureKey(weaponId: keyof typeof weaponDefinitions): string {
+  return `player/hull-${weaponId}`;
 }
 
 function getEnemyTint(baseColor: number, healthRatio: number): number {

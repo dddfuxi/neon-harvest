@@ -1,5 +1,6 @@
-import { enemyDefinitions, getEnemySpawnMix } from "../content/enemies";
+﻿import { enemyDefinitions, getEnemySpawnMix } from "../content/enemies";
 import { upgradeDefinitions, upgradePool, type UpgradeId } from "../content/upgrades";
+import type { EnemyType } from "../content/enemies";
 import { weaponDefinitions, type WeaponId } from "../content/weapons";
 import type { InputSnapshot } from "../input/actions";
 import { add, clamp, distance, fromAngle, normalize, scale, subtract } from "./math";
@@ -10,9 +11,13 @@ import type {
   BossPattern,
   EnemyState,
   HazardState,
+  HitEffectState,
   ObstacleState,
   ProjectileState,
+  RunAnnouncement,
+  RunObjectiveState,
   RunSummary,
+  RunTheme,
   ShardState,
   SimulationState,
   Vec2
@@ -41,11 +46,17 @@ export function updateSimulation(
   }
 
   if (state.run.status !== "running") {
-    return coolScreenFlash(state, deltaSeconds);
+    const cooled = tickAnnouncement(tickHitEffects(coolScreenFlash(state, deltaSeconds), deltaSeconds), deltaSeconds);
+    if (cooled.run.status === "run-over" && cooled.run.runOverDelay > 0) {
+      return tickRunOverDelay(cooled, deltaSeconds);
+    }
+    return cooled;
   }
 
   let next = { ...state, run: { ...state.run, time: state.run.time + deltaSeconds } };
   next = coolScreenFlash(next, deltaSeconds);
+  next = tickHitEffects(next, deltaSeconds);
+  next = tickAnnouncement(next, deltaSeconds);
   next = tickPlayer(next, deltaSeconds, input);
   next = refreshWorldChunks(next);
   next = spawnEnemies(next, deltaSeconds);
@@ -57,6 +68,7 @@ export function updateSimulation(
   next = updateExtraction(next, deltaSeconds, input);
   next = maybeTriggerBossEvent(next);
   next = maybeOfferLevelUp(next);
+  next = updateObjective(next, deltaSeconds);
   next = updateTutorialHint(next);
   next = checkDefeat(next);
 
@@ -76,6 +88,63 @@ function coolScreenFlash(state: SimulationState, deltaSeconds: number): Simulati
       ...state.run,
       screenFlash: nextFlash,
       bossAlertTimer: nextBossAlertTimer
+    }
+  };
+}
+
+function tickRunOverDelay(state: SimulationState, deltaSeconds: number): SimulationState {
+  const nextDelay = Math.max(0, state.run.runOverDelay - deltaSeconds);
+  if (nextDelay === state.run.runOverDelay) {
+    return state;
+  }
+
+  return {
+    ...state,
+    run: {
+      ...state.run,
+      runOverDelay: nextDelay
+    }
+  };
+}
+
+function tickHitEffects(state: SimulationState, deltaSeconds: number): SimulationState {
+  if (state.run.hitEffects.length === 0) {
+    return state;
+  }
+
+  const hitEffects = state.run.hitEffects
+    .map((effect) => ({
+      ...effect,
+      ttl: effect.ttl - deltaSeconds
+    }))
+    .filter((effect) => effect.ttl > 0);
+
+  return {
+    ...state,
+    run: {
+      ...state.run,
+      hitEffects
+    }
+  };
+}
+
+function tickAnnouncement(state: SimulationState, deltaSeconds: number): SimulationState {
+  if (!state.run.announcement) {
+    return state;
+  }
+
+  const timer = state.run.announcement.timer - deltaSeconds;
+  return {
+    ...state,
+    run: {
+      ...state.run,
+      announcement:
+        timer > 0
+          ? {
+              ...state.run.announcement,
+              timer
+            }
+          : null
     }
   };
 }
@@ -220,13 +289,20 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
 
   return {
     ...state,
+    nextId: state.nextId + 1,
     run: {
       ...state.run,
       status: "running",
       player,
       appliedUpgrades: applied,
       offeredUpgrades: [],
-      tutorialHint: `${definition.title} 已安装。`,
+      tutorialHint: `构筑已接入：${definition.title}。`,
+      announcement: createAnnouncement(
+        state.nextId,
+        "构筑完成",
+        `${definition.title} 已接入，继续沿当前路线推进。`,
+        "upgrade"
+      ),
       screenFlash: 0.9
     }
   };
@@ -261,17 +337,26 @@ function tickPlayer(state: SimulationState, deltaSeconds: number, input: InputSn
 }
 
 function refreshWorldChunks(state: SimulationState): SimulationState {
-  const generated = generateChunkObstacles(state.world.seed, state.world.chunkSize, state.run.player.position);
-  if (sameChunkSet(generated.chunkKeys, state.run.activeChunkKeys)) {
+  const loadChunkKeys = collectChunkKeys(state.run.player.position, state.world.chunkSize, 4);
+  const retainChunkKeys = collectChunkKeys(state.run.player.position, state.world.chunkSize, 5);
+  const currentChunkSet = new Set(state.run.activeChunkKeys);
+  const retainChunkSet = new Set(retainChunkKeys);
+  const retainedChunkKeys = state.run.activeChunkKeys.filter((chunkKey) => retainChunkSet.has(chunkKey));
+  const missingChunkKeys = loadChunkKeys.filter((chunkKey) => !currentChunkSet.has(chunkKey));
+
+  if (missingChunkKeys.length === 0 && retainedChunkKeys.length === state.run.activeChunkKeys.length) {
     return state;
   }
+
+  const retainedObstacles = state.run.obstacles.filter((obstacle) => retainChunkSet.has(obstacle.chunkKey));
+  const addedObstacles = generateChunkObstacles(state.world.seed, state.world.chunkSize, missingChunkKeys);
 
   return {
     ...state,
     run: {
       ...state.run,
-      obstacles: generated.obstacles,
-      activeChunkKeys: generated.chunkKeys
+      obstacles: [...retainedObstacles, ...addedObstacles],
+      activeChunkKeys: [...retainedChunkKeys, ...missingChunkKeys]
     }
   };
 }
@@ -388,11 +473,14 @@ function createProjectile(
 function spawnEnemies(state: SimulationState, deltaSeconds: number): SimulationState {
   const bossActive = state.run.enemies.some((enemy) => enemy.type === "boss");
   const earlyPenalty = state.run.time < 45 ? 2 : state.run.time < 90 ? 1 : 0;
+  const stagePressure = Math.floor((state.run.objective.stage - 1) / 3);
+  const themeCountBonus = state.run.stageTheme === "siege" ? 2 : state.run.stageTheme === "crossfire" ? 1 : 0;
   const desiredCount = Math.max(
     2,
-    Math.floor((bossActive ? 2 : 4) + state.run.time / 14 + state.run.unbankedShards / 55 - earlyPenalty)
+    Math.floor((bossActive ? 2 : 4) + state.run.time / 14 + state.run.unbankedShards / 55 + stagePressure * 1.5 + themeCountBonus - earlyPenalty)
   );
-  const spawnRate = clamp((state.run.time < 75 ? 0.72 + state.run.time / 120 : 1.3 + state.run.time / 55), 0.72, 7.2);
+  const themeRateBonus = state.run.stageTheme === "siege" ? 0.26 : state.run.stageTheme === "crossfire" ? 0.14 : 0;
+  const spawnRate = clamp((state.run.time < 75 ? 0.72 + state.run.time / 120 : 1.3 + state.run.time / 55) + stagePressure * 0.18 + themeRateBonus, 0.72, 7.2);
   const spawnInterval = 1 / spawnRate;
   let accumulator = state.run.spawnAccumulator + deltaSeconds;
   let next = state;
@@ -420,7 +508,7 @@ function spawnEnemies(state: SimulationState, deltaSeconds: number): SimulationS
 }
 
 function spawnSingleEnemy(state: SimulationState): SimulationState {
-  const mix = getEnemySpawnMix(state.run.time);
+  const mix = getEnemySpawnMix(state.run.time, state.run.stageTheme);
   const choice = randomChoice(state.rngSeed, mix);
   const angleRoll = randomFloat(choice.seed);
   const radiusRoll = randomFloat(angleRoll.seed);
@@ -464,13 +552,17 @@ function spawnSingleEnemy(state: SimulationState): SimulationState {
   };
 }
 
-function spawnBoss(state: SimulationState, pattern: BossPattern): SimulationState {
+function spawnBoss(
+  state: SimulationState,
+  pattern: BossPattern,
+  options?: { hpMultiplier?: number; radiusMultiplier?: number; colorOverride?: number }
+): SimulationState {
   const definition = enemyDefinitions.boss;
   const angleRoll = randomFloat(state.rngSeed);
   const angle = angleRoll.value * Math.PI * 2;
   const position = add(state.run.player.position, scale(fromAngle(angle), 420));
-  const radiusScale = pattern === "artillery" ? 1.42 : 1.28;
-  const hpScale = pattern === "artillery" ? 1.14 : 1.06;
+  const radiusScale = (pattern === "artillery" ? 1.42 : 1.28) * (options?.radiusMultiplier ?? 1);
+  const hpScale = (pattern === "artillery" ? 1.14 : 1.06) * (options?.hpMultiplier ?? 1);
   const enemy: EnemyState = {
     id: `e-${state.nextId}`,
     type: "boss",
@@ -487,7 +579,7 @@ function spawnBoss(state: SimulationState, pattern: BossPattern): SimulationStat
     chargeTimer: 0,
     chargeDirection: { x: 0, y: 0 },
     touchCooldown: 0,
-    color: pattern === "artillery" ? 0xff516b : 0xff7a4a
+    color: options?.colorOverride ?? (pattern === "artillery" ? 0xff516b : 0xff7a4a)
   };
 
   return {
@@ -503,10 +595,13 @@ function spawnBoss(state: SimulationState, pattern: BossPattern): SimulationStat
 }
 
 function maybeAddHazards(state: SimulationState): SimulationState {
-  const hazardTier = Math.floor(state.run.time / 150);
+  const hazardTier = Math.max(Math.floor(state.run.time / 150), Math.floor((state.run.objective.stage - 1) / 3));
   if (hazardTier <= state.run.activeHazardTier || hazardTier === 0) {
     return state;
   }
+
+  const hazardRadiusBonus = state.run.stageTheme === "siege" ? 18 : state.run.stageTheme === "crossfire" ? -6 : 0;
+  const hazardDamageBonus = state.run.stageTheme === "siege" ? 4 : state.run.stageTheme === "crossfire" ? 2 : 0;
 
   const hazard: HazardState = {
     id: `h-${state.nextId}`,
@@ -514,8 +609,8 @@ function maybeAddHazards(state: SimulationState): SimulationState {
       x: 180 + ((hazardTier * 260) % 260),
       y: -140 + ((hazardTier * 170) % 240)
     }),
-    radius: 58 + hazardTier * 12,
-    damagePerSecond: 10 + hazardTier * 4,
+    radius: 58 + hazardTier * 12 + hazardRadiusBonus,
+    damagePerSecond: 10 + hazardTier * 4 + hazardDamageBonus,
     active: true,
     telegraphTime: 0,
     duration: 999,
@@ -529,7 +624,12 @@ function maybeAddHazards(state: SimulationState): SimulationState {
       ...state.run,
       activeHazardTier: hazardTier,
       hazards: [...state.run.hazards, hazard],
-      tutorialHint: "风暴口袋已成形，把敌群赶进去。"
+      tutorialHint:
+        state.run.stageTheme === "siege"
+          ? "围城阶段出现重压风暴区，拖拽敌人穿过去能明显减压。"
+          : state.run.stageTheme === "crossfire"
+            ? "交火阶段的风暴区更窄但更密，注意别被远程火力逼进去。"
+            : "游猎阶段形成风暴口袋，可以把敌人赶进去吃伤害。",
     }
   };
 }
@@ -543,6 +643,7 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
   let regenDelay = player.shieldRegenDelay;
   let skillCooldown = player.skillCooldown;
   let skillEffectTimer = player.skillEffectTimer;
+  let lastDamageSource = state.run.lastDamageSource;
   let screenFlash = state.run.screenFlash;
   let nextId = state.nextId;
 
@@ -583,6 +684,16 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
       }
       shield = damageResult.shield;
       hp = damageResult.hp;
+      lastDamageSource =
+        enemy.type === "boss"
+          ? enemyNext.chargeTimer > 0
+            ? "被首领冲锋正面撞穿"
+            : "被首领近身压制击毁"
+          : enemy.type === "brute"
+            ? "被厚甲单位贴身碾碎"
+            : enemy.type === "sniper"
+              ? "被远程目标贴近补伤收掉"
+              : "被近身敌群围死";
       regenDelay = 4;
       screenFlash = 1;
       enemyNext.touchCooldown = enemy.type === "boss" ? 1.1 : 0.65;
@@ -631,6 +742,7 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
       enemies,
       hazards,
       projectiles,
+      lastDamageSource,
       screenFlash
     }
   };
@@ -717,8 +829,10 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
   let score = state.run.score;
   let enemiesDestroyed = state.run.enemiesDestroyed;
   let xp = state.run.player.xp;
+  let lastDamageSource = state.run.lastDamageSource;
   let screenFlash = state.run.screenFlash;
   const shards = [...state.run.shards];
+  const hitEffects = [...state.run.hitEffects];
   const spawnedProjectiles: ProjectileState[] = [];
   let nextId = state.nextId;
   const remainingProjectiles: ProjectileState[] = [];
@@ -751,11 +865,28 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
           collided = true;
           const damage = nextProjectile.damage;
           const nextEnemy = { ...enemy, hp: enemy.hp - damage };
+          const weaponId = getWeaponIdByColor(nextProjectile.color);
           healed += damage * state.run.player.lifeSteal;
+          pushHitEffect(hitEffects, nextId, {
+            position: { ...nextProjectile.position },
+            color: nextProjectile.color,
+            weaponId,
+            kind: weaponId === "nova-driver" ? "burst" : weaponId === "shard-lance" ? "pierce-trail" : "spark",
+            ttl: weaponId === "nova-driver" ? 0.24 : weaponId === "shard-lance" ? 0.18 : 0.14
+          });
+          nextId += 1;
 
           if (nextProjectile.explosiveRadius > 0) {
             enemies = applyExplosionDamage(enemies, nextProjectile.position, nextProjectile.explosiveRadius, damage * 0.4, enemy.id);
             screenFlash = Math.max(screenFlash, 0.36);
+            pushHitEffect(hitEffects, nextId, {
+              position: { ...nextProjectile.position },
+              color: nextProjectile.color,
+              weaponId,
+              kind: "burst",
+              ttl: 0.28
+            });
+            nextId += 1;
           }
 
           if (nextEnemy.hp <= 0) {
@@ -788,17 +919,44 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
 
       const obstacleImpact = resolveProjectileObstacleImpact(nextProjectile, state.run.obstacles);
       if (obstacleImpact.didImpact && (obstacleImpact.response === "reflect" || nextProjectile.ricochetLeft > 0)) {
+        const weaponId = getWeaponIdByColor(nextProjectile.color);
         nextProjectile.position = obstacleImpact.position;
         nextProjectile.velocity = obstacleImpact.velocity;
         if (obstacleImpact.response !== "reflect" && nextProjectile.ricochetLeft > 0) {
           nextProjectile.ricochetLeft -= 1;
         }
         screenFlash = Math.max(screenFlash, obstacleImpact.response === "reflect" ? 0.22 : 0.18);
+        pushHitEffect(hitEffects, nextId, {
+          position: { ...obstacleImpact.position },
+          color: nextProjectile.color,
+          weaponId,
+          kind: "ricochet-flash",
+          ttl: 0.2
+        });
+        nextId += 1;
       } else if (obstacleImpact.didImpact && nextProjectile.obstaclePierceLeft > 0) {
+        const weaponId = getWeaponIdByColor(nextProjectile.color);
         nextProjectile.obstaclePierceLeft -= 1;
         screenFlash = Math.max(screenFlash, 0.12);
+        pushHitEffect(hitEffects, nextId, {
+          position: { ...obstacleImpact.position },
+          color: nextProjectile.color,
+          weaponId,
+          kind: "pierce-trail",
+          ttl: 0.16
+        });
+        nextId += 1;
       } else if (obstacleImpact.didImpact) {
+        const weaponId = getWeaponIdByColor(nextProjectile.color);
         collided = true;
+        pushHitEffect(hitEffects, nextId, {
+          position: { ...obstacleImpact.position },
+          color: nextProjectile.color,
+          weaponId,
+          kind: weaponId === "nova-driver" ? "burst" : "spark",
+          ttl: weaponId === "nova-driver" ? 0.22 : 0.14
+        });
+        nextId += 1;
       }
 
       if (!collided || nextProjectile.pierceLeft >= 0) {
@@ -822,6 +980,7 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
         }
         shield = damageResult.shield;
         hp = damageResult.hp;
+        lastDamageSource = "被远程火力压垮";
         regenDelay = 4;
         screenFlash = 1;
       } else {
@@ -883,8 +1042,10 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
         skillEffectTimer
       },
       enemies,
+      hitEffects,
       projectiles: [...remainingProjectiles, ...spawnedProjectiles],
       shards,
+      lastDamageSource,
       bankedShards: banked,
       unbankedShards: unbanked,
       score,
@@ -940,6 +1101,7 @@ function updateHazards(state: SimulationState, deltaSeconds: number): Simulation
   let regenDelay = state.run.player.shieldRegenDelay;
   let skillCooldown = state.run.player.skillCooldown;
   let skillEffectTimer = state.run.player.skillEffectTimer;
+  let lastDamageSource = state.run.lastDamageSource;
   let screenFlash = state.run.screenFlash;
   const hazards = state.run.hazards.flatMap((hazard) => {
     const nextHazard: HazardState = {
@@ -963,6 +1125,7 @@ function updateHazards(state: SimulationState, deltaSeconds: number): Simulation
       }
       shield = damageResult.shield;
       hp = damageResult.hp;
+      lastDamageSource = nextHazard.source === "boss" ? "被首领炮击区域吞没" : "在风暴区里持续失血";
       regenDelay = 4;
       screenFlash = Math.max(screenFlash, nextHazard.source === "boss" ? 0.72 : 0.28);
     }
@@ -987,6 +1150,7 @@ function updateHazards(state: SimulationState, deltaSeconds: number): Simulation
         skillCooldown,
         skillEffectTimer
       },
+      lastDamageSource,
       screenFlash
     }
   };
@@ -1005,7 +1169,7 @@ function maybeUnlockExtraction(state: SimulationState): SimulationState {
         ...state.run.extraction,
         unlocked: true
       },
-      tutorialHint: "撤离窗口已开启，按住 E 可撤离，也可以继续贪收益。",
+      tutorialHint: "\u64a4\u79bb\u7a97\u53e3\u5df2\u5f00\u542f\uff0c\u6309\u4f4f E \u53ef\u4ee5\u79bb\u573a\uff0c\u4e5f\u53ef\u4ee5\u7ee7\u7eed\u8d2a\u6536\u76ca\u3002",
       screenFlash: 1
     }
   };
@@ -1037,21 +1201,34 @@ function updateExtraction(state: SimulationState, deltaSeconds: number, input: I
 
 function maybeTriggerBossEvent(state: SimulationState): SimulationState {
   const bossActive = state.run.enemies.some((enemy) => enemy.type === "boss");
+  if (state.run.objective.stage >= 9) {
+    return state;
+  }
   const nextSpawnTime = 30 + state.run.bossSpawnCount * 60;
   if (bossActive || state.run.time < nextSpawnTime) {
     return state;
   }
 
   const patternRoll = randomFloat(state.rngSeed);
-  let next = {
+  let next: SimulationState = {
     ...state,
+    nextId: state.nextId + 1,
     rngSeed: patternRoll.seed,
     run: {
       ...state.run,
       bossEventTriggered: true,
       bossSpawnCount: state.run.bossSpawnCount + 1,
       bossAlertTimer: 5,
-      tutorialHint: patternRoll.value > 0.5 ? "首领进入战场：炮击型，红圈落点将压缩走位。" : "首领进入战场：冲锋型，保持横向位移，别站在直线上。"
+      announcement: createAnnouncement(
+        state.nextId,
+        "首领入场",
+        patternRoll.value > 0.5 ? "炮击型目标已锁定本区，立刻脱离收缩红圈。" : "冲锋型目标已锁定航线，优先横向脱离蓄力线。",
+        "boss"
+      ),
+      tutorialHint:
+        patternRoll.value > 0.5
+          ? "\u9996\u9886\u8fdb\u5165\u6218\u573a\uff1a\u70ae\u51fb\u578b\uff0c\u79bb\u5f00\u7ea2\u5708\u9884\u8b66\u533a\u57df\u3002"
+          : "\u9996\u9886\u8fdb\u5165\u6218\u573a\uff1a\u51b2\u950b\u578b\uff0c\u4fdd\u6301\u4fa7\u5411\u4f4d\u79fb\u907f\u5f00\u76f4\u7ebf\u51b2\u649e\u3002",
     }
   };
   next = spawnBoss(next, patternRoll.value > 0.5 ? "artillery" : "charger");
@@ -1070,7 +1247,7 @@ function maybeOfferLevelUp(state: SimulationState): SimulationState {
 
   player.xp -= player.xpToNext;
   player.xpLevel += 1;
-  player.xpToNext = Math.floor(player.xpToNext * 1.34 + 16);
+  player.xpToNext = Math.floor(player.xpToNext * 1.52 + 26);
 
   return {
     ...state,
@@ -1081,6 +1258,194 @@ function maybeOfferLevelUp(state: SimulationState): SimulationState {
       offeredUpgrades: rollUpgrades(state)
     }
   };
+}
+
+function updateObjective(state: SimulationState, deltaSeconds: number): SimulationState {
+  if (state.run.status !== "running") {
+    return state;
+  }
+
+  const objective = state.run.objective;
+  const nextFlash = Math.max(0, objective.completionFlash - deltaSeconds);
+  const nextProgress = getObjectiveProgress(state, objective);
+
+  if (objective.completed) {
+    if (nextFlash > 0) {
+      return {
+        ...state,
+        run: {
+          ...state.run,
+          objective: {
+            ...objective,
+            completionFlash: nextFlash
+          }
+        }
+      };
+    }
+
+    return advanceStage(state);
+  }
+
+  if (nextProgress < objective.target) {
+    if (nextProgress === objective.progress) {
+      return state;
+    }
+
+    return {
+      ...state,
+      run: {
+        ...state.run,
+        objective: {
+          ...objective,
+          progress: nextProgress
+        }
+      }
+    };
+  }
+
+  return {
+    ...state,
+    nextId: state.nextId + 1,
+    run: {
+      ...state.run,
+      player: {
+        ...state.run.player,
+        xp: state.run.player.xp + objective.rewardXp,
+        shield: Math.min(state.run.player.maxShield, state.run.player.shield + 14)
+      },
+      bankedShards: state.run.bankedShards + objective.rewardShards,
+      objective: {
+        ...objective,
+        progress: objective.target,
+        completed: true,
+        completionFlash: 2.4
+      },
+      tutorialHint: `${objective.title} \u5df2\u5b8c\u6210\uff0c\u83b7\u5f97 ${objective.rewardShards} \u79ef\u5206\u4e0e ${objective.rewardXp} \u7ecf\u9a8c\u3002`,
+      announcement: createAnnouncement(
+        state.nextId,
+        "阶段完成",
+        `${objective.title} 达成 · +${objective.rewardShards} 积分 · +${objective.rewardXp} 经验`,
+        "phase"
+      ),
+      screenFlash: Math.max(state.run.screenFlash, 0.65)
+    }
+  };
+}
+
+function getObjectiveProgress(state: SimulationState, objective: RunObjectiveState): number {
+  switch (objective.kind) {
+    case "collect-shards":
+      return Math.max(0, state.run.bankedShards - objective.baselineBankedShards);
+    case "defeat-enemies":
+      return Math.max(0, state.run.enemiesDestroyed - objective.baselineEnemiesDestroyed);
+    case "survive":
+      return Math.max(0, Math.floor(state.run.time - objective.baselineTime));
+    default:
+      return objective.progress;
+  }
+}
+
+function createNextObjective(state: SimulationState): RunObjectiveState {
+  const nextStage = state.run.objective.stage + 1;
+  const cycle = Math.max(0, nextStage - 1);
+  const kindIndex = cycle % 3;
+
+  if (kindIndex === 0) {
+    const target = 26 + Math.floor(cycle / 3) * 10;
+    return {
+      id: `objective-${nextStage}`,
+      stage: nextStage,
+      cycle,
+      kind: "collect-shards",
+      title: "回收信标",
+      description: `再回收 ${target} 点能量碎片，稳定本区航道。`,
+      target,
+      progress: 0,
+      rewardShards: 18 + cycle * 4,
+      rewardXp: 8 + cycle * 2,
+      baselineTime: state.run.time,
+      baselineBankedShards: state.run.bankedShards,
+      baselineEnemiesDestroyed: state.run.enemiesDestroyed,
+      completed: false,
+      completionFlash: 0
+    };
+  }
+
+  if (kindIndex === 1) {
+    const target = 8 + Math.floor(cycle / 3) * 3;
+    return {
+      id: `objective-${nextStage}`,
+      stage: nextStage,
+      cycle,
+      kind: "defeat-enemies",
+      title: "清剿节点",
+      description: `击破 ${target} 个敌方目标，压低局部威胁。`,
+      target,
+      progress: 0,
+      rewardShards: 22 + cycle * 4,
+      rewardXp: 10 + cycle * 2,
+      baselineTime: state.run.time,
+      baselineBankedShards: state.run.bankedShards,
+      baselineEnemiesDestroyed: state.run.enemiesDestroyed,
+      completed: false,
+      completionFlash: 0
+    };
+  }
+
+  const target = 24 + Math.floor(cycle / 3) * 6;
+  return {
+    id: `objective-${nextStage}`,
+    stage: nextStage,
+    cycle,
+    kind: "survive",
+    title: "稳态维持",
+    description: `守住阵线 ${target} 秒，等待回收链路重连。`,
+    target,
+    progress: 0,
+    rewardShards: 20 + cycle * 5,
+    rewardXp: 12 + cycle * 2,
+    baselineTime: state.run.time,
+    baselineBankedShards: state.run.bankedShards,
+    baselineEnemiesDestroyed: state.run.enemiesDestroyed,
+    completed: false,
+    completionFlash: 0
+  };
+}
+
+function getThemeForStage(stage: number): RunTheme {
+  const chapter = Math.floor(Math.max(0, stage - 1) / 3) % 3;
+  if (chapter === 1) {
+    return "siege";
+  }
+  if (chapter === 2) {
+    return "crossfire";
+  }
+  return "skirmish";
+}
+
+function getThemeLabel(theme: RunTheme): string {
+  switch (theme) {
+    case "crossfire":
+      return "交火阶段";
+    case "siege":
+      return "围城阶段";
+    default:
+      return "游猎阶段";
+  }
+}
+
+function pushHitEffect(
+  hitEffects: HitEffectState[],
+  nextId: number,
+  effect: Omit<HitEffectState, "id">
+): void {
+  hitEffects.push({
+    id: `fx-hit-${nextId}`,
+    ...effect
+  });
+  if (hitEffects.length > 48) {
+    hitEffects.splice(0, hitEffects.length - 48);
+  }
 }
 
 function rollUpgrades(state: SimulationState): UpgradeId[] {
@@ -1117,7 +1482,7 @@ function rollUpgrades(state: SimulationState): UpgradeId[] {
 }
 
 function updateTutorialHint(state: SimulationState): SimulationState {
-  if (state.run.time < 30) {
+  if (state.run.objective.completed && state.run.objective.completionFlash > 0) {
     return state;
   }
 
@@ -1126,12 +1491,18 @@ function updateTutorialHint(state: SimulationState): SimulationState {
       ...state,
       run: {
         ...state.run,
-        tutorialHint: "只看得见视野内的敌人与障碍。扩大视野，或者把战斗拖近。"
+        tutorialHint: `${getThemeLabel(state.run.stageTheme)} · 阶段 ${state.run.objective.stage}：${state.run.objective.description}`
       }
     };
   }
 
-  return state;
+  return {
+    ...state,
+    run: {
+      ...state.run,
+      tutorialHint: `撤离已开启。当前仍处于${getThemeLabel(state.run.stageTheme)}，你也可以先完成阶段 ${state.run.objective.stage} 目标再走。`
+    }
+  };
 }
 
 function checkDefeat(state: SimulationState): SimulationState {
@@ -1144,18 +1515,37 @@ function checkDefeat(state: SimulationState): SimulationState {
 function endRun(state: SimulationState, result: RunSummary["result"]): SimulationState {
   const extractionBonus = result === "extracted" ? state.run.extraction.rewardMultiplier : 0.55;
   const payout = Math.round(state.run.unbankedShards * extractionBonus * (result === "extracted" ? state.run.player.economyMultiplier : 0.45));
+  const objectivesCompleted = Math.max(0, state.run.objective.stage - 1 + (state.run.objective.completed ? 1 : 0));
+  const keyUpgradeIds = state.run.appliedUpgrades.filter((upgradeId) => upgradeId !== "weapon-tuning");
+  const keyUpgradeTitles = keyUpgradeIds
+    .slice(-4)
+    .map((upgradeId) => upgradeDefinitions[upgradeId]?.title)
+    .filter((title): title is string => Boolean(title));
+  const buildRecap =
+    keyUpgradeTitles.length > 0
+      ? `武器 Lv.${state.run.player.weaponLevel} · 关键升级：${keyUpgradeTitles.join(" / ")}`
+      : `武器 Lv.${state.run.player.weaponLevel} · 本轮主要依靠基础火力推进`;
+  const deathReason =
+    result === "extracted" ? "成功撤离，结算完成" : state.run.lastDamageSource || "在持续交火中被压垮";
   const summary: RunSummary = {
     result,
     duration: state.run.time,
     level: state.run.player.xpLevel,
+    weaponId: state.run.player.weaponId,
+    weaponLevel: state.run.player.weaponLevel,
     shardsBanked: result === "extracted" ? state.run.bankedShards + payout : payout,
     enemiesDestroyed: state.run.enemiesDestroyed,
+    objectivesCompleted,
+    highestStage: state.run.objective.stage,
+    buildRecap,
+    keyUpgrades: keyUpgradeTitles,
+    deathReason,
     extractionBonus
   };
   const leaderboardEntry = {
     id: `lb-${state.nextId}-${Math.floor(state.run.time)}`,
     recordedAt: Date.now(),
-    playerName: "本地记录",
+    playerName: "鏈湴璁板綍",
     weaponId: state.run.player.weaponId,
     score: summary.shardsBanked,
     result,
@@ -1186,8 +1576,12 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     run: {
       ...state.run,
       status: "run-over",
+      runOverDelay: result === "dead" ? 1 : 0,
       runSummary: summary,
-      tutorialHint: result === "extracted" ? "成功带回战利品。下一次可以把视野和盾量做大。" : "护盾破裂后 hull 被击穿。下次优先做视野或续航。",
+      tutorialHint:
+        result === "extracted"
+          ? `本轮成功撤离。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`
+          : `本轮机体损毁。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`,
       bankedShards: summary.shardsBanked,
       unbankedShards: 0,
       extraction: {
@@ -1328,6 +1722,190 @@ function createKillBurstProjectiles(nextId: number, position: Vec2, color: numbe
   return burst;
 }
 
+function createAnnouncement(
+  nextId: number,
+  title: string,
+  subtitle: string,
+  tone: RunAnnouncement["tone"],
+  duration = 2.2
+): RunAnnouncement {
+  return {
+    id: `announcement-${nextId}`,
+    title,
+    subtitle,
+    tone,
+    timer: duration,
+    duration
+  };
+}
+
+function advanceStage(state: SimulationState): SimulationState {
+  const nextStage = state.run.objective.stage + 1;
+  const nextObjective = createNextObjective(state);
+  let next: SimulationState = {
+    ...state,
+    run: {
+      ...state.run,
+      objective: nextObjective,
+      stageTheme: getThemeForStage(nextStage),
+      tutorialHint: `阶段 ${nextStage} 已开始：${nextObjective.description}`,
+      announcement: createAnnouncement(
+        state.nextId,
+        `阶段 ${nextStage} 任务`,
+        `${nextObjective.title} · ${nextObjective.description}`,
+        "phase",
+        3.8
+      )
+    }
+  };
+
+  if (state.run.objective.stage === 3) {
+    next = {
+      ...next,
+      nextId: next.nextId + 1,
+      run: {
+        ...next.run,
+        stageTheme: "siege",
+        announcement: createAnnouncement(
+          next.nextId,
+          "节点异变",
+          `围城态接管本区。新任务：${next.run.objective.title} · ${next.run.objective.description}`,
+          "phase",
+          4.4
+        ),
+        tutorialHint: "围城态已生效。敌群更厚、更密，优先拉开站位再处理近身单位。",
+        screenFlash: Math.max(next.run.screenFlash, 0.72)
+      }
+    };
+    return next;
+  }
+
+  if (state.run.objective.stage === 6) {
+    next = spawnEliteWave(next);
+    next = {
+      ...next,
+      nextId: next.nextId + 1,
+      run: {
+        ...next.run,
+        announcement: createAnnouncement(
+          next.nextId,
+          "节点压境",
+          `精英群已切入本区。新任务：${next.run.objective.title} · ${next.run.objective.description}`,
+          "phase",
+          4.4
+        ),
+        tutorialHint: "第 6 阶段结点触发精英群。先处理精英火力点，别让阵线被一波冲碎。",
+        bossAlertTimer: Math.max(next.run.bossAlertTimer, 2.4),
+        screenFlash: Math.max(next.run.screenFlash, 0.84)
+      }
+    };
+    return next;
+  }
+
+  if (state.run.objective.stage === 9) {
+    next = triggerStageBoss(next);
+    return next;
+  }
+
+  return next;
+}
+
+function spawnEliteWave(state: SimulationState): SimulationState {
+  let nextId = state.nextId;
+  const formations: Array<{ type: EnemyType; modifier: "fast" | "volatile" | null; angle: number; distance: number; hpScale: number }> = [
+    { type: "sniper", modifier: "volatile", angle: -0.85, distance: 310, hpScale: 1.45 },
+    { type: "sniper", modifier: "volatile", angle: 0.85, distance: 310, hpScale: 1.45 },
+    { type: "drone", modifier: "fast", angle: -0.35, distance: 250, hpScale: 1.4 },
+    { type: "drone", modifier: "fast", angle: 0.35, distance: 250, hpScale: 1.4 },
+    { type: "brute", modifier: "volatile", angle: 0, distance: 360, hpScale: 1.7 }
+  ];
+
+  const enemies = [...state.run.enemies];
+  for (const formation of formations) {
+    const definition = enemyDefinitions[formation.type];
+    const position = add(state.run.player.position, scale(fromAngle(formation.angle), formation.distance));
+    enemies.push({
+      id: `e-${nextId}`,
+      type: definition.type,
+      modifier: formation.modifier,
+      bossPattern: null,
+      position: resolveObstacleCollision(position, definition.radius, state.run.obstacles),
+      velocity: { x: 0, y: 0 },
+      radius: definition.radius,
+      hp: definition.health * formation.hpScale,
+      maxHp: definition.health * formation.hpScale,
+      fireCooldown: definition.rangedCooldown ?? 0,
+      skillCooldown: 0,
+      secondaryCooldown: 0,
+      chargeTimer: 0,
+      chargeDirection: { x: 0, y: 0 },
+      touchCooldown: 0,
+      color: formation.modifier === "volatile" ? 0xffe670 : definition.color
+    });
+    nextId += 1;
+  }
+
+  return {
+    ...state,
+    nextId,
+    run: {
+      ...state.run,
+      enemies
+    }
+  };
+}
+
+function triggerStageBoss(state: SimulationState): SimulationState {
+  const bossActive = state.run.enemies.some((enemy) => enemy.type === "boss");
+  let next: SimulationState = {
+    ...state,
+    nextId: state.nextId + 1,
+    run: {
+      ...state.run,
+      bossSpawnCount: Math.max(state.run.bossSpawnCount, 1) + 1,
+      bossAlertTimer: 6,
+      announcement: createAnnouncement(state.nextId, "结点首领", "强化首领已切入本区，先活下来，再找输出窗口。", "boss"),
+      tutorialHint: "第 9 阶段触发强化首领。它的体型、血量和压制能力都高于常规首领。"
+    }
+  };
+
+  if (bossActive) {
+    return {
+      ...next,
+      run: {
+        ...next.run,
+        enemies: next.run.enemies.map((enemy) => {
+          if (enemy.type !== "boss") {
+            return enemy;
+          }
+          const nextMaxHp = enemy.maxHp * 1.35;
+          return {
+            ...enemy,
+            radius: enemy.radius * 1.14,
+            maxHp: nextMaxHp,
+            hp: enemy.hp + nextMaxHp * 0.28,
+            color: 0xff2f45
+          };
+        }),
+        screenFlash: Math.max(next.run.screenFlash, 1)
+      }
+    };
+  }
+
+  const pattern = state.run.stageTheme === "crossfire" ? "artillery" : "charger";
+  next = spawnBoss(next, pattern, {
+    hpMultiplier: 1.42,
+    radiusMultiplier: 1.18,
+    colorOverride: 0xff2f45
+  });
+  return next;
+}
+
+function getWeaponIdByColor(color: number): WeaponId {
+  const matched = Object.values(weaponDefinitions).find((weapon) => weapon.color === color);
+  return matched?.id ?? "pulse-blaster";
+}
+
 function findClosestEnemy(position: Vec2, enemies: EnemyState[], maxDistance: number): EnemyState | null {
   let best: EnemyState | null = null;
   let bestDistance = maxDistance;
@@ -1377,25 +1955,23 @@ function resolveObstacleCollision(position: Vec2, radius: number, obstacles: Obs
   return next;
 }
 
-function generateChunkObstacles(
-  baseSeed: number,
-  chunkSize: number,
-  center: Vec2
-): { chunkKeys: string[]; obstacles: ObstacleState[] } {
+function generateChunkObstacles(baseSeed: number, chunkSize: number, chunkKeys: string[]): ObstacleState[] {
   const obstacles: ObstacleState[] = [];
-  const chunkKeys: string[] = [];
-  const chunkX = Math.floor(center.x / chunkSize);
-  const chunkY = Math.floor(center.y / chunkSize);
   const kinds = [
     { kind: "rock" as const, color: 0x31445f, min: 18, max: 54, projectileResponse: "block" as const },
     { kind: "crystal" as const, color: 0x3d6f95, min: 16, max: 42, projectileResponse: "reflect" as const },
     { kind: "pillar" as const, color: 0x4f5d7a, min: 20, max: 38, projectileResponse: "block" as const }
   ];
 
-  for (let y = chunkY - 3; y <= chunkY + 3; y += 1) {
-    for (let x = chunkX - 3; x <= chunkX + 3; x += 1) {
+  for (const chunkKey of chunkKeys) {
+    const [xText, yText] = chunkKey.split(":");
+    const x = Number(xText);
+    const y = Number(yText);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      continue;
+    }
+
       const chunkSeed = hashChunkSeed(baseSeed, x, y);
-      chunkKeys.push(`${x}:${y}`);
       let seed = chunkSeed;
       const countRoll = randomFloat(seed);
       seed = countRoll.seed;
@@ -1417,12 +1993,9 @@ function generateChunkObstacles(
           y: y * chunkSize + 70 + offsetYRoll.value * (chunkSize - 140)
         };
 
-        if (distance(position, center) < 150) {
-          continue;
-        }
-
         obstacles.push({
           id: `o-${x}-${y}-${index}`,
+          chunkKey,
           position,
           radius,
           kind: kindRoll.value.kind,
@@ -1430,10 +2003,9 @@ function generateChunkObstacles(
           projectileResponse: kindRoll.value.projectileResponse
         });
       }
-    }
   }
 
-  return { chunkKeys, obstacles };
+  return obstacles;
 }
 
 function hashChunkSeed(baseSeed: number, chunkX: number, chunkY: number): number {
@@ -1442,14 +2014,17 @@ function hashChunkSeed(baseSeed: number, chunkX: number, chunkY: number): number
   return hash >>> 0;
 }
 
-function sameChunkSet(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) {
-      return false;
+function collectChunkKeys(center: Vec2, chunkSize: number, radius: number): string[] {
+  const chunkX = Math.floor(center.x / chunkSize);
+  const chunkY = Math.floor(center.y / chunkSize);
+  const chunkKeys: string[] = [];
+
+  for (let y = chunkY - radius; y <= chunkY + radius; y += 1) {
+    for (let x = chunkX - radius; x <= chunkX + radius; x += 1) {
+      chunkKeys.push(`${x}:${y}`);
     }
   }
-  return true;
+
+  return chunkKeys;
 }
+

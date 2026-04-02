@@ -1,7 +1,26 @@
 import { createInitialState } from "../simulation/state";
-import type { SimulationState } from "../simulation/types";
+import type { RunSummary, SimulationState } from "../simulation/types";
 
 const STORAGE_KEY = "neon-harvest-save-v1";
+
+function migrateLastRunSummary(
+  summary: SimulationState["meta"]["lastRunSummary"]
+): RunSummary | null {
+  if (!summary) {
+    return null;
+  }
+
+  return {
+    ...summary,
+    weaponId: summary.weaponId ?? "pulse-blaster",
+    weaponLevel: summary.weaponLevel ?? 1,
+    objectivesCompleted: summary.objectivesCompleted ?? 0,
+    highestStage: summary.highestStage ?? 1,
+    buildRecap: summary.buildRecap ?? "本轮记录来自旧版本存档。",
+    keyUpgrades: summary.keyUpgrades ?? [],
+    deathReason: summary.deathReason ?? (summary.result === "extracted" ? "成功撤离，结算完成" : "旧版本未记录失败原因")
+  };
+}
 
 export function loadState(): SimulationState {
   const fallback = createInitialState();
@@ -36,6 +55,7 @@ export function loadState(): SimulationState {
       meta: {
         ...mergedMeta,
         unlockedWeapons,
+        lastRunSummary: migrateLastRunSummary(mergedMeta.lastRunSummary),
         leaderboard: Array.isArray(mergedMeta.leaderboard) ? mergedMeta.leaderboard.slice(0, 10) : []
       }
     };

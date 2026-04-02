@@ -1,8 +1,8 @@
-import { defaultMetaState } from "./meta";
+﻿import { defaultMetaState } from "./meta";
 import { characterSkillPool } from "../content/skills";
 import { distance } from "./math";
 import { randomChoice, randomFloat } from "./random";
-import type { PlayerState, SimulationState } from "./types";
+import type { PlayerState, RunObjectiveState, RunTheme, SimulationState } from "./types";
 
 function createPlayerState(
   weaponId: PlayerState["weaponId"],
@@ -19,7 +19,7 @@ function createPlayerState(
     maxShield: 80,
     xp: 0,
     xpLevel: 1,
-    xpToNext: 45,
+    xpToNext: 82,
     moveSpeed: 220,
     dashCooldown: dashVariantUnlocked ? 2.2 : 2.8,
     dashTimer: 0,
@@ -53,6 +53,88 @@ function createPlayerState(
   };
 }
 
+function getThemeForStage(stage: number): RunTheme {
+  const cycle = Math.max(0, stage - 1) % 3;
+  if (cycle === 1) {
+    return "crossfire";
+  }
+  if (cycle === 2) {
+    return "siege";
+  }
+  return "skirmish";
+}
+
+function createRunObjective(
+  stage: number,
+  time: number,
+  bankedShards: number,
+  enemiesDestroyed: number
+): RunObjectiveState {
+  const cycle = Math.max(0, stage - 1);
+  const kindIndex = cycle % 3;
+
+  if (kindIndex === 0) {
+    const target = 26 + Math.floor(cycle / 3) * 10;
+    return {
+      id: `objective-${stage}`,
+      stage,
+      cycle,
+      kind: "collect-shards",
+      title: "\u56de\u6536\u4fe1\u6807",
+      description: `\u518d\u56de\u6536 ${target} \u70b9\u80fd\u91cf\u788e\u7247\uff0c\u7a33\u5b9a\u672c\u533a\u822a\u9053\u3002`,
+      target,
+      progress: 0,
+      rewardShards: 18 + cycle * 4,
+      rewardXp: 6 + cycle * 2,
+      baselineTime: time,
+      baselineBankedShards: bankedShards,
+      baselineEnemiesDestroyed: enemiesDestroyed,
+      completed: false,
+      completionFlash: 0
+    };
+  }
+
+  if (kindIndex === 1) {
+    const target = 8 + Math.floor(cycle / 3) * 3;
+    return {
+      id: `objective-${stage}`,
+      stage,
+      cycle,
+      kind: "defeat-enemies",
+      title: "\u6e05\u527f\u8282\u70b9",
+      description: `\u51fb\u7834 ${target} \u4e2a\u654c\u65b9\u76ee\u6807\uff0c\u538b\u4f4e\u5c40\u90e8\u5a01\u80c1\u3002`,
+      target,
+      progress: 0,
+      rewardShards: 22 + cycle * 4,
+      rewardXp: 8 + cycle * 2,
+      baselineTime: time,
+      baselineBankedShards: bankedShards,
+      baselineEnemiesDestroyed: enemiesDestroyed,
+      completed: false,
+      completionFlash: 0
+    };
+  }
+
+  const target = 24 + Math.floor(cycle / 3) * 6;
+  return {
+    id: `objective-${stage}`,
+    stage,
+    cycle,
+    kind: "survive",
+    title: "\u7a33\u6001\u7ef4\u6301",
+    description: `\u5b88\u4f4f\u9635\u7ebf ${target} \u79d2\uff0c\u7b49\u5f85\u56de\u6536\u94fe\u8def\u91cd\u8fde\u3002`,
+    target,
+    progress: 0,
+    rewardShards: 20 + cycle * 5,
+    rewardXp: 10 + cycle * 2,
+    baselineTime: time,
+    baselineBankedShards: bankedShards,
+    baselineEnemiesDestroyed: enemiesDestroyed,
+    completed: false,
+    completionFlash: 0
+  };
+}
+
 export function createInitialState(): SimulationState {
   return {
     world: { chunkSize: 480, seed: 1337 },
@@ -60,6 +142,7 @@ export function createInitialState(): SimulationState {
       status: "menu",
       time: 0,
       spawnAccumulator: 0,
+      runOverDelay: 0,
       player: createPlayerState("pulse-blaster", false, "phase-burst"),
       obstacles: [],
       activeChunkKeys: [],
@@ -67,6 +150,10 @@ export function createInitialState(): SimulationState {
       projectiles: [],
       shards: [],
       hazards: [],
+      hitEffects: [],
+      announcement: null,
+      objective: createRunObjective(1, 0, 0, 0),
+      stageTheme: getThemeForStage(1),
       extraction: {
         unlocked: false,
         active: false,
@@ -86,7 +173,8 @@ export function createInitialState(): SimulationState {
       bossEventTriggered: false,
       bossSpawnCount: 0,
       bossAlertTimer: 0,
-      tutorialHint: "WASD 移动，鼠标瞄准。护盾会先承伤，8 分钟后开放撤离。",
+      lastDamageSource: "",
+      tutorialHint: "\u7528 WASD \u79fb\u52a8\uff0c\u7528\u9f20\u6807\u7784\u51c6\uff0c\u5148\u7a33\u4f4f\u9635\u811a\u7b49\u5f85\u64a4\u79bb\u7a97\u53e3\u5f00\u542f\u3002",
       screenFlash: 0,
       runSummary: null
     },
@@ -110,6 +198,7 @@ export function createRunState(previous: SimulationState, weaponId?: PlayerState
       status: "running",
       time: 0,
       spawnAccumulator: 1.2,
+      runOverDelay: 0,
       player: basePlayer,
       obstacles: obstacleResult.obstacles,
       activeChunkKeys: obstacleResult.chunkKeys,
@@ -117,6 +206,10 @@ export function createRunState(previous: SimulationState, weaponId?: PlayerState
       projectiles: [],
       shards: [],
       hazards: [],
+      hitEffects: [],
+      announcement: null,
+      objective: createRunObjective(1, 0, 0, 0),
+      stageTheme: getThemeForStage(1),
       extraction: {
         unlocked: false,
         active: false,
@@ -136,7 +229,8 @@ export function createRunState(previous: SimulationState, weaponId?: PlayerState
       bossEventTriggered: false,
       bossSpawnCount: 0,
       bossAlertTimer: 0,
-      tutorialHint: "收集能量碎片，尽快做出第一轮构筑，8 分钟后再决定要不要撤离。",
+      lastDamageSource: "",
+      tutorialHint: "\u5148\u505a\u51fa\u7b2c\u4e00\u8f6e\u6218\u6597\u6784\u7b51\uff0c\u4e4b\u540e\u518d\u51b3\u5b9a\u662f\u7ee7\u7eed\u63a8\u8fdb\u8fd8\u662f\u64a4\u79bb\u3002",
       screenFlash: 0,
       runSummary: null
     }
@@ -193,6 +287,7 @@ function generateObstacles(
 
         obstacles.push({
           id: `o-${x}-${y}-${index}`,
+          chunkKey: `${x}:${y}`,
           position,
           radius,
           kind: kindRoll.value.kind,
@@ -211,3 +306,5 @@ function hashChunkSeed(baseSeed: number, chunkX: number, chunkY: number): number
   hash = (hash ^ (hash >>> 13)) * 1274126177;
   return hash >>> 0;
 }
+
+

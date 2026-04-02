@@ -1,4 +1,5 @@
 import type Phaser from "phaser";
+import { weaponDefinitions } from "../../game/content/weapons";
 
 export function createGeneratedTextures(scene: Phaser.Scene): void {
   if (!scene.textures.exists("fx/vision-mask")) {
@@ -19,12 +20,14 @@ export function createGeneratedTextures(scene: Phaser.Scene): void {
 
   const graphics = scene.add.graphics();
 
-  graphics.fillStyle(0x6cf3ff, 1);
-  graphics.fillCircle(16, 16, 12);
-  graphics.lineStyle(2, 0xe7fbff, 0.9);
-  graphics.strokeCircle(16, 16, 12);
-  graphics.generateTexture("player/hull", 32, 32);
-  graphics.clear();
+  for (const weapon of Object.values(weaponDefinitions)) {
+    graphics.fillStyle(weapon.color, 1);
+    graphics.fillCircle(16, 16, 12);
+    graphics.lineStyle(2, 0xffffff, 0.95);
+    graphics.strokeCircle(16, 16, 12);
+    graphics.generateTexture(`player/hull-${weapon.id}`, 32, 32);
+    graphics.clear();
+  }
 
   graphics.fillStyle(0xff728f, 1);
   graphics.fillCircle(12, 12, 10);
@@ -92,4 +95,41 @@ export function createGeneratedTextures(scene: Phaser.Scene): void {
   graphics.fillCircle(54, 92, 1.5);
   graphics.generateTexture("bg/grid-tile", 128, 128);
   graphics.destroy();
+
+  const themeGraphics = scene.add.graphics();
+
+  themeGraphics.fillStyle(0x091525, 0.0);
+  themeGraphics.fillRect(0, 0, 128, 128);
+  themeGraphics.fillStyle(0x6cf3ff, 0.08);
+  themeGraphics.fillCircle(20, 26, 4);
+  themeGraphics.fillCircle(84, 56, 3);
+  themeGraphics.fillCircle(50, 98, 2);
+  themeGraphics.lineStyle(1, 0x6cf3ff, 0.08);
+  themeGraphics.strokeCircle(92, 30, 14);
+  themeGraphics.generateTexture("bg/theme-skirmish", 128, 128);
+  themeGraphics.clear();
+
+  themeGraphics.fillStyle(0x0b1224, 0.0);
+  themeGraphics.fillRect(0, 0, 128, 128);
+  themeGraphics.lineStyle(2, 0x7f9dff, 0.09);
+  themeGraphics.lineBetween(0, 18, 128, 44);
+  themeGraphics.lineBetween(0, 66, 128, 92);
+  themeGraphics.lineBetween(0, 114, 96, 128);
+  themeGraphics.fillStyle(0xb482ff, 0.05);
+  themeGraphics.fillRect(40, 12, 12, 12);
+  themeGraphics.fillRect(92, 72, 14, 14);
+  themeGraphics.generateTexture("bg/theme-crossfire", 128, 128);
+  themeGraphics.clear();
+
+  themeGraphics.fillStyle(0x150d08, 0.0);
+  themeGraphics.fillRect(0, 0, 128, 128);
+  themeGraphics.lineStyle(2, 0xff9c47, 0.08);
+  themeGraphics.strokeCircle(30, 30, 20);
+  themeGraphics.strokeCircle(94, 82, 16);
+  themeGraphics.strokeCircle(70, 118, 10);
+  themeGraphics.fillStyle(0xffc46b, 0.04);
+  themeGraphics.fillCircle(28, 30, 6);
+  themeGraphics.fillCircle(92, 80, 5);
+  themeGraphics.generateTexture("bg/theme-siege", 128, 128);
+  themeGraphics.destroy();
 }

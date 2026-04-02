@@ -108,8 +108,27 @@ export type HazardState = {
   source: "storm" | "boss";
 };
 
+export type HitEffectState = {
+  id: string;
+  position: Vec2;
+  color: number;
+  weaponId: WeaponId;
+  kind: "spark" | "burst" | "pierce-trail" | "ricochet-flash";
+  ttl: number;
+};
+
+export type RunAnnouncement = {
+  id: string;
+  title: string;
+  subtitle: string;
+  tone: "phase" | "upgrade" | "boss";
+  timer: number;
+  duration: number;
+};
+
 export type ObstacleState = {
   id: string;
+  chunkKey: string;
   position: Vec2;
   radius: number;
   kind: "rock" | "crystal" | "pillar";
@@ -127,12 +146,40 @@ export type ExtractionState = {
   rewardMultiplier: number;
 };
 
+export type RunObjectiveKind = "collect-shards" | "defeat-enemies" | "survive";
+export type RunTheme = "skirmish" | "crossfire" | "siege";
+
+export type RunObjectiveState = {
+  id: string;
+  stage: number;
+  cycle: number;
+  kind: RunObjectiveKind;
+  title: string;
+  description: string;
+  target: number;
+  progress: number;
+  rewardShards: number;
+  rewardXp: number;
+  baselineTime: number;
+  baselineBankedShards: number;
+  baselineEnemiesDestroyed: number;
+  completed: boolean;
+  completionFlash: number;
+};
+
 export type RunSummary = {
   result: "dead" | "extracted";
   duration: number;
   level: number;
+  weaponId: WeaponId;
+  weaponLevel: number;
   shardsBanked: number;
   enemiesDestroyed: number;
+  objectivesCompleted: number;
+  highestStage: number;
+  buildRecap: string;
+  keyUpgrades: string[];
+  deathReason: string;
   extractionBonus: number;
 };
 
@@ -169,6 +216,7 @@ export type RunState = {
   status: "menu" | "running" | "paused" | "level-up" | "run-over" | "meta";
   time: number;
   spawnAccumulator: number;
+  runOverDelay: number;
   player: PlayerState;
   obstacles: ObstacleState[];
   activeChunkKeys: string[];
@@ -176,6 +224,10 @@ export type RunState = {
   projectiles: ProjectileState[];
   shards: ShardState[];
   hazards: HazardState[];
+  hitEffects: HitEffectState[];
+  announcement: RunAnnouncement | null;
+  objective: RunObjectiveState;
+  stageTheme: RunTheme;
   extraction: ExtractionState;
   score: number;
   bankedShards: number;
@@ -187,6 +239,7 @@ export type RunState = {
   bossEventTriggered: boolean;
   bossSpawnCount: number;
   bossAlertTimer: number;
+  lastDamageSource: string;
   tutorialHint: string;
   screenFlash: number;
   runSummary: RunSummary | null;

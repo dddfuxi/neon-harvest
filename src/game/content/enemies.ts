@@ -63,7 +63,27 @@ export const enemyDefinitions: Record<EnemyType, EnemyDefinition> = {
   }
 };
 
-export function getEnemySpawnMix(elapsed: number): EnemyType[] {
+export function getEnemySpawnMix(elapsed: number, theme: "skirmish" | "crossfire" | "siege" = "skirmish"): EnemyType[] {
+  if (theme === "crossfire") {
+    if (elapsed < 120) {
+      return ["drone", "sniper"];
+    }
+    if (elapsed < 300) {
+      return ["drone", "sniper", "sniper"];
+    }
+    return ["drone", "sniper", "sniper", "brute"];
+  }
+
+  if (theme === "siege") {
+    if (elapsed < 120) {
+      return ["drone", "brute"];
+    }
+    if (elapsed < 300) {
+      return ["drone", "brute", "brute"];
+    }
+    return ["drone", "sniper", "brute", "brute"];
+  }
+
   if (elapsed < 90) {
     return ["drone"];
   }
