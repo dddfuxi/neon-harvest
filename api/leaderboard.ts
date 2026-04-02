@@ -29,8 +29,8 @@ function setCors(response: VercelResponse): void {
 }
 
 async function fetchRedis(path: string, init?: RequestInit): Promise<Response> {
-  const baseUrl = process.env.KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN;
+  const baseUrl = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!baseUrl || !token) {
     throw new Error("Leaderboard backend not configured");
   }
