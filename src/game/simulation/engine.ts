@@ -1155,6 +1155,7 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
   const leaderboardEntry = {
     id: `lb-${state.nextId}-${Math.floor(state.run.time)}`,
     recordedAt: Date.now(),
+    playerName: "本地记录",
     weaponId: state.run.player.weaponId,
     score: summary.shardsBanked,
     result,

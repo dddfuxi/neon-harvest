@@ -3,6 +3,7 @@ import { createClient } from "redis";
 type ScoreEntry = {
   id: string;
   recordedAt: number;
+  playerName: string;
   weaponId: string;
   score: number;
   result: "dead" | "extracted";
@@ -139,6 +140,7 @@ function normalizeEntry(input: unknown): ScoreEntry | null {
   if (
     typeof entry.id !== "string" ||
     typeof entry.recordedAt !== "number" ||
+    typeof entry.playerName !== "string" ||
     typeof entry.weaponId !== "string" ||
     typeof entry.score !== "number" ||
     (entry.result !== "dead" && entry.result !== "extracted") ||
@@ -152,6 +154,7 @@ function normalizeEntry(input: unknown): ScoreEntry | null {
   return {
     id: entry.id,
     recordedAt: entry.recordedAt,
+    playerName: entry.playerName.trim().slice(0, 24) || "匿名回收员",
     weaponId: entry.weaponId,
     score: entry.score,
     result: entry.result,

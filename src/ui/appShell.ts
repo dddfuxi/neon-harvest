@@ -35,6 +35,7 @@ export function createAppShell(root: HTMLElement): void {
   let onlineLeaderboard: LeaderboardEntry[] = [];
   let leaderboardNotice = "";
   let isUploadingScore = false;
+  let leaderboardName = window.localStorage.getItem("neon-harvest-player-name") ?? "";
   const commandQueue: UiCommand[] = [];
 
   root.innerHTML = `
@@ -68,7 +69,7 @@ export function createAppShell(root: HTMLElement): void {
     state = next;
     persistState(state);
     renderHud(hudLayer, state);
-    renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore);
+    renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName);
     modalLayer.style.pointerEvents = state.run.status === "running" ? "none" : "auto";
     touchLayer.classList.toggle("active", state.run.status === "running");
     updateOrientationOverlay(orientationLayer, state.run.status === "running");
@@ -141,9 +142,18 @@ export function createAppShell(root: HTMLElement): void {
     const weaponButton = target.closest<HTMLElement>("[data-weapon]");
     if (weaponButton) {
       selectedWeapon = weaponButton.dataset.weapon as WeaponId;
-      renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore);
+      renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName);
       modalLayer.style.pointerEvents = state.run.status === "running" ? "none" : "auto";
     }
+  });
+
+  modalLayer.addEventListener("input", (event) => {
+    const target = event.target as HTMLInputElement | null;
+    if (!target || target.dataset.field !== "leaderboard-name") {
+      return;
+    }
+    leaderboardName = target.value.slice(0, 24);
+    window.localStorage.setItem("neon-harvest-player-name", leaderboardName);
   });
 
   window.addEventListener("resize", () => {
@@ -176,6 +186,7 @@ export function createAppShell(root: HTMLElement): void {
     const payload: LeaderboardEntry = {
       id: `score-${summary.result}-${summary.duration}-${summary.level}-${summary.enemiesDestroyed}-${summary.shardsBanked}`,
       recordedAt: Date.now(),
+      playerName: leaderboardName.trim() || "匿名回收员",
       weaponId: state.run.player.weaponId,
       score: summary.shardsBanked,
       result: summary.result,
@@ -256,7 +267,8 @@ function renderModal(
   selectedWeapon: WeaponId,
   onlineLeaderboard: LeaderboardEntry[],
   leaderboardNotice: string,
-  isUploadingScore: boolean
+  isUploadingScore: boolean,
+  leaderboardName: string
 ): void {
   const summary = state.meta.lastRunSummary ?? state.run.runSummary;
   const weapon = weaponDefinitions[selectedWeapon];
@@ -472,6 +484,10 @@ function renderModal(
           </div>
           ${leaderboardNotice ? `<p class="body-copy">${leaderboardNotice}</p>` : ""}
           ${renderLeaderboard(onlineLeaderboard)}
+          <label class="leaderboard-name-field">
+            <span class="label">上传昵称</span>
+            <input type="text" maxlength="24" value="${escapeHtml(leaderboardName)}" placeholder="输入你的名字" data-field="leaderboard-name" />
+          </label>
           <div class="button-row">
             <button type="button" class="button primary" data-command="upload-score" ${isUploadingScore ? "disabled" : ""}>${isUploadingScore ? "上传中..." : "上传本局战绩"}</button>
           </div>
@@ -667,6 +683,15 @@ function renderLeaderboard(entries: LeaderboardEntry[]): string {
         .join("")}
     </div>
   `;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function translateResult(result: "dead" | "extracted"): string {

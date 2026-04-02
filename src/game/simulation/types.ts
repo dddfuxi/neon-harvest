@@ -139,6 +139,7 @@ export type RunSummary = {
 export type LeaderboardEntry = {
   id: string;
   recordedAt: number;
+  playerName: string;
   weaponId: WeaponId;
   score: number;
   result: RunSummary["result"];
