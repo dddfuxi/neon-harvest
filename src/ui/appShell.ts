@@ -928,6 +928,8 @@ function renderModal(
         : state.run.upgradeOfferSource === "boss-epic"
           ? "复制体核心崩解后会掉出高阶奖励，本次至少会看到稀有和史诗。"
           : "先看流派定位，再决定是补短板，还是继续把强项推到极致。";
+    /** 仅普通升级三选一保留 stagger 入场；副本史诗箱要即时可点，不再叠入场延迟 */
+    const useUpgradeCardEnterAnimation = state.run.upgradeOfferSource === "level-up";
     const shouldShowLegendaryCore = isLegendaryReward && !legendaryRewardOpened;
     const revealInputLocked = Boolean(shouldShowLegendaryCore && Date.now() < legendaryRevealClickUnlockAt);
     const choicesInputLocked = Boolean(
@@ -953,12 +955,17 @@ function renderModal(
               </button>
             `
             : `
-              <div class="upgrade-grid rich ${isLegendaryReward ? "legendary-reward-grid" : "upgrade-choice-cards--enter"}">
+              <div class="upgrade-grid rich ${isLegendaryReward ? "legendary-reward-grid" : useUpgradeCardEnterAnimation ? "upgrade-choice-cards--enter" : ""}">
                 ${state.run.offeredUpgrades
                   .map((upgradeId, index) => {
                     const upgrade = upgradeDefinitions[upgradeId];
+                    const cardStyle = isLegendaryReward
+                      ? `--entry-delay:${index * LEGENDARY_CARD_STAGGER_MS}ms`
+                      : useUpgradeCardEnterAnimation
+                        ? `--enter-stagger:${index * 65}ms`
+                        : "";
                     return `
-                      <article class="choice-card rarity-${upgrade.rarity} ${isLegendaryReward ? "legendary-reward-card" : ""} ${firstEncounterIds.includes(upgradeId) ? "choice-card--first-encounter" : ""}" style="${isLegendaryReward ? `--entry-delay:${index * LEGENDARY_CARD_STAGGER_MS}ms` : `--enter-stagger:${index * 65}ms`}">
+                      <article class="choice-card rarity-${upgrade.rarity} ${isLegendaryReward ? "legendary-reward-card" : ""} ${firstEncounterIds.includes(upgradeId) ? "choice-card--first-encounter" : ""}"${cardStyle ? ` style="${cardStyle}"` : ""}>
                         <div class="choice-meta">
                           <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
                           <span class="rarity-type">${categoryMap[upgrade.category]}</span>
