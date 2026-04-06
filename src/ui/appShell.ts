@@ -32,6 +32,13 @@ type OnlineRunSession = {
   sessionToken: string;
 };
 
+/** 传说奖励 UI 时序（与 styles 中 legendary-card-entry 时长一致） */
+const LEGENDARY_REVEAL_CLICK_GUARD_MS = 220;
+const LEGENDARY_CORE_AUTO_REVEAL_MS = 750;
+const LEGENDARY_CARD_ENTRY_MS = 400;
+const LEGENDARY_CARD_STAGGER_MS = 70;
+const LEGENDARY_CHOICES_TAIL_BUFFER_MS = 80;
+
 const categoryMap = {
   weapon: "武器",
   survivability: "生存",
@@ -43,7 +50,8 @@ const rarityMap = {
   common: "标准",
   rare: "稀有",
   epic: "史诗",
-  legendary: "传说"
+  legendary: "传说",
+  mythic: "超神"
 } as const;
 
 export function createAppShell(root: HTMLElement): void {
@@ -98,12 +106,6 @@ export function createAppShell(root: HTMLElement): void {
 
   setupTouchControls(touchLayer);
 
-  const LEGENDARY_REVEAL_CLICK_GUARD_MS = 520;
-  const LEGENDARY_CORE_AUTO_REVEAL_MS = 1100;
-  const LEGENDARY_CARD_ENTRY_MS = 520;
-  const LEGENDARY_CARD_STAGGER_MS = 90;
-  const LEGENDARY_CHOICES_TAIL_BUFFER_MS = 320;
-
   const scheduleLegendaryChoicesUnlock = (offerCount: number) => {
     const stagger = Math.max(0, offerCount - 1) * LEGENDARY_CARD_STAGGER_MS;
     legendaryChoicesClickUnlockAt = Date.now() + stagger + LEGENDARY_CARD_ENTRY_MS + LEGENDARY_CHOICES_TAIL_BUFFER_MS;
@@ -156,9 +158,10 @@ export function createAppShell(root: HTMLElement): void {
   };
 
   const syncLegendaryRewardReveal = () => {
+    // 必须与公告无关：announcement 数秒后会清空，若 key 含 announcement.id 会突变并重置「核心析出」→ 同一次奖励打开两次。
     const nextKey =
       state.run.status === "level-up" && state.run.upgradeOfferSource === "boss-legendary"
-        ? `${state.run.announcement?.id ?? "legendary"}:${state.run.offeredUpgrades.join(",")}`
+        ? `boss-legendary:${state.run.offeredUpgrades.join(",")}`
         : null;
 
     if (!nextKey) {
@@ -911,10 +914,6 @@ function renderModal(
   if (state.run.status === "level-up") {
     const discovered = new Set(state.meta.discoveredUpgradeIds);
     const firstEncounterIds = state.run.offeredUpgrades.filter((id) => !discovered.has(id));
-    const firstEncounterBanner =
-      firstEncounterIds.length > 0
-        ? `<p class="first-obtain-banner" role="status">首次遭遇：下列强化尚未写入图鉴，确认领取后即视为已获取。</p>`
-        : "";
     const isLegendaryReward = state.run.upgradeOfferSource === "boss-legendary";
     const offerTitle =
       state.run.upgradeOfferSource === "boss-legendary"
@@ -938,7 +937,6 @@ function renderModal(
         <p class="label">${state.run.upgradeOfferSource === "level-up" ? "构筑升级" : "副本奖励"}</p>
         <h2 class="screen-title compact">${offerTitle}</h2>
         <p class="screen-subtitle">${offerSubtitle}</p>
-        ${firstEncounterBanner}
         ${
           shouldShowLegendaryCore
             ? `
@@ -950,16 +948,16 @@ function renderModal(
                   <div class="legendary-core-glow"></div>
                 </div>
                 <strong>传说核心正在析出</strong>
-                <span>${revealInputLocked ? "正在屏蔽误触，稍后可点击展开…" : "约 1.1 秒后自动展开；亦可点击展开"}</span>
+                <span>${revealInputLocked ? "正在屏蔽误触，稍后可点击展开…" : "约 0.75 秒后自动展开；亦可点击展开"}</span>
               </button>
             `
             : `
-              <div class="upgrade-grid rich ${isLegendaryReward ? "legendary-reward-grid" : ""}">
+              <div class="upgrade-grid rich ${isLegendaryReward ? "legendary-reward-grid" : "upgrade-choice-cards--enter"}">
                 ${state.run.offeredUpgrades
                   .map((upgradeId, index) => {
                     const upgrade = upgradeDefinitions[upgradeId];
                     return `
-                      <article class="choice-card rarity-${upgrade.rarity} ${isLegendaryReward ? "legendary-reward-card" : ""} ${firstEncounterIds.includes(upgradeId) ? "choice-card--first-encounter" : ""}" style="${isLegendaryReward ? `--entry-delay:${index * 90}ms` : ""}">
+                      <article class="choice-card rarity-${upgrade.rarity} ${isLegendaryReward ? "legendary-reward-card" : ""} ${firstEncounterIds.includes(upgradeId) ? "choice-card--first-encounter" : ""}" style="${isLegendaryReward ? `--entry-delay:${index * LEGENDARY_CARD_STAGGER_MS}ms` : `--enter-stagger:${index * 65}ms`}">
                         <div class="choice-meta">
                           <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
                           <span class="rarity-type">${categoryMap[upgrade.category]}</span>
@@ -977,6 +975,7 @@ function renderModal(
                         <div class="button-row">
                           <button type="button" class="button primary choice-confirm-button" data-upgrade="${upgradeId}" ${choicesInputLocked ? "disabled" : ""}>${choicesInputLocked ? "入场动画中…" : "选择强化"}</button>
                         </div>
+                        ${firstEncounterIds.includes(upgradeId) ? `<span class="first-obtain-badge">首次获取</span>` : ""}
                       </article>
                     `;
                   })
@@ -1370,7 +1369,11 @@ function describeUpgrade(upgradeId: keyof typeof upgradeDefinitions): string {
     "survey-array": `视野范围 +95。${repeatable}`,
     "deep-radar": `视野范围 +155。${repeatable}`,
     "vector-plate": `在瞄准朝向上展开窄屏障，拦截敌方远程弹体；不挡近身接触。${repeatable}`,
-    "orbit-plates": `三面屏障绕机体公转，拦截远程弹体（与向矢偏转板同时持有时以本效果为准）；不挡近身。${repeatable}`,
+    "orbit-plate-1": `第一面屏障绕机体公转；可再叠至三面。与向矢偏转板可同时存在（向矢仍为瞄准窄条，互不替代）。${repeatable}`,
+    "orbit-plate-2": `第二面屏障加入公转，覆盖更大角度。${repeatable}`,
+    "orbit-plate-3": `第三面屏障，环轨三面封顶。${repeatable}`,
+    "ricochet-aegis": `环轨段变赤红并反弹远程弹。段数随环轨阶位；无阶位时 1 段环绕。向矢偏转板仍保留为瞄准窄条。${repeatable}`,
+    "apex-sanctuary": `射速 +100%、射程 +100%、弹体放大；移速 +6%、经验 +5%；每 10 秒循环内有 2 秒完全无敌（近身、弹体与危险区均不扣血）。${repeatable}`,
     "salvo-duel": `我方弹体与敌方远程弹体相撞时双方同时湮灭。${repeatable}`
   };
 

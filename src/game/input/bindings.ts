@@ -1,7 +1,7 @@
 import type Phaser from "phaser";
 
 import { createEmptyInput, type InputSnapshot } from "./actions";
-import { consumeVirtualControls, isVirtualControlsEnabled } from "./virtualControls";
+import { consumeVirtualControls, isVirtualControlsEnabled, peekVirtualAimState } from "./virtualControls";
 import type { EnemyState } from "../simulation/types";
 
 export class InputController {
@@ -68,6 +68,48 @@ export class InputController {
 
     return input;
   }
+}
+
+const AIM_RETICLE_OFFSET = 108;
+
+/**
+ * 世界坐标下用于绘制瞄准标识的位置（与 {@link InputController.snapshot} 的瞄准逻辑一致）。
+ * - 键鼠：鼠标指针落点。
+ * - 虚拟摇杆：机体前方沿当前射击方向一段距离（含辅助瞄准）。
+ * - 触控但未启用虚拟键：使用 `lastAimDirection` 在机体前方显示，避免准星粘在屏幕一角。
+ */
+export function getAimReticleWorldPosition(
+  scene: Phaser.Scene,
+  playerX: number,
+  playerY: number,
+  enemies: EnemyState[],
+  lastAimDirection: { x: number; y: number }
+): { x: number; y: number } {
+  if (isVirtualControlsEnabled()) {
+    const { aim, fire } = peekVirtualAimState();
+    const aimVec =
+      fire || aim.x !== 0 || aim.y !== 0 ? applyAimAssist(aim, playerX, playerY, enemies) ?? aim : aim;
+    const len = Math.hypot(aimVec.x, aimVec.y);
+    const dir = len > 0.02 ? { x: aimVec.x / len, y: aimVec.y / len } : { x: 1, y: 0 };
+    return {
+      x: playerX + dir.x * AIM_RETICLE_OFFSET,
+      y: playerY + dir.y * AIM_RETICLE_OFFSET
+    };
+  }
+
+  const coarse =
+    typeof window !== "undefined" && window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+  if (coarse) {
+    const len = Math.hypot(lastAimDirection.x, lastAimDirection.y);
+    const dir = len > 0.02 ? { x: lastAimDirection.x / len, y: lastAimDirection.y / len } : { x: 1, y: 0 };
+    return {
+      x: playerX + dir.x * AIM_RETICLE_OFFSET,
+      y: playerY + dir.y * AIM_RETICLE_OFFSET
+    };
+  }
+
+  const pointer = scene.input.activePointer;
+  return { x: pointer.worldX, y: pointer.worldY };
 }
 
 function applyAimAssist(

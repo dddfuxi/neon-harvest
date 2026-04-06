@@ -19,7 +19,7 @@
 - **终幕大首领（战役第 12 阶段前入场、激光栅格型）**：**最终被复制的你**——技能模型用你**整段航迹 telemetry** 合成的**终幕复写体**（局内公告 **「终幕·你的复写」**），青蓝光谱与横纵激光为识别特征。
 - **奖励链路**：击败上述复制体 / 复写体后掉落的是局内 UI 所称的**副本宝箱**（引擎仍为 `boss-epic` / `boss-legendary`），与普通升级三选一池独立。
 - **通关印记**：战役结算为 `cleared`，或故事模式推进至第 12 阶段后成功撤离（`extracted` 且最高阶段 ≥ 12）时 +1，用于在机库兑换**武器库改装**（按改装 T1/T2/T3 消耗 1/2/3 点；不再消耗积分）。积分仍用于机库通用项目与开局补给。
-- **首次遭遇**：若三选一中出现尚未领取过、未写入图鉴的升级，会显示「首次遭遇」提示与卡片高亮；领取后写入 `discoveredUpgradeIds` 即不再视为首次。
+- **首次获取**：若三选一中出现尚未写入图鉴的升级，对应卡片会有轻微外圈高亮并标注「首次获取」（不遮挡正文）；领取后写入 `discoveredUpgradeIds` 即不再视为首次。
 
 ## 技能树分支
 
@@ -66,12 +66,16 @@
 | `blood-siphon` | 血虹吸 | `survival` | 2 | epic | survivability | `rapid-cycle` | 否 | 直接提供明显吸血，把输出稳定转成续航；单次回复较高时有绿色闪光提示。 |
 | `aegis-surge` | 神盾奔涌 | `survival` | 3 | epic | survivability | `auto-forge`, `lattice-armor` | 否 | 同时强化护盾、生命和减伤，显著提高站场能力。 |
 | `phoenix-protocol` | 不死协议 | `survival` | 3 | legendary | survivability | `blood-siphon`, `aegis-surge` | 否 | 传说续命核心，抬高血盾并额外提供一次应急修复。 |
+| `ricochet-aegis` | 反弹盾 | `survival` | 3 | legendary | survivability | `vector-plate`, `aegis-surge` | 否 | 环轨段变赤红并反弹远程弹；**段数由环轨盾阵阶位决定**（无阶位时仍为 **1** 段环绕）。**向矢偏转板独立保留**（瞄准窄条），与环轨分开计算。 |
+| `apex-sanctuary` | 超神 · 空域圣约 | `survival` | 3 | mythic | survivability | `phoenix-protocol`, `zero-point-lattice` | 否 | 射速 +100%、子弹射程 +100%、弹体尺寸放大；移速 +6%、经验 +5%；每 10s 循环含 2s 完全无敌（近身、弹体、危险区均无效）；仅在普通升级三选一中极低概率出现，不出现在副本宝箱池。 |
 | `ghost-shell` | 幽灵弹壳 | `barrage` | 2 | rare | weapon | `twin-fang` | 否 | 命中后触发小范围爆裂，提高群压能力。 |
 | `bank-heist` | 深空劫运 | `economy` | 2 | rare | economy | `salvage-net` | 是 | 提高未结算碎片与即时积分收益；HUD 显示资源倍率、未入账碎片与劫运状态。 |
 | `survey-array` | 勘测阵列 | `scout` | 1 | common | mobility | 无 | 是 | 明显扩大视野范围，让侦测收益更容易体感到。 |
 | `deep-radar` | 深空雷达 | `scout` | 2 | epic | mobility | `survey-array` | 否 | 大幅拉高视野上限，在黑暗地图里会非常明显。 |
 | `vector-plate` | 向矢偏转板 | `survival` | 2 | rare | survivability | `phase-cooling` | 否 | 瞄准朝向上的窄屏障，拦截敌方远程弹体；不挡近身接触。 |
-| `orbit-plates` | 环轨盾阵 | `survival` | 3 | epic | survivability | `vector-plate` | 否 | 三面屏障绕机体公转拦截远程；与向矢偏转板同时持有时以本效果为准。 |
+| `orbit-plate-1` | 环轨盾阵 · 一阶 | `survival` | 2 | rare | survivability | `vector-plate` | 否 | 第一面绕体公转屏障；可再获取二阶、三阶叠至三面封顶。与向矢可同时生效、段数独立；持有反弹盾时环轨段为赤红反弹。 |
+| `orbit-plate-2` | 环轨盾阵 · 二阶 | `survival` | 3 | epic | survivability | `orbit-plate-1` | 否 | 第二面屏障加入公转。 |
+| `orbit-plate-3` | 环轨盾阵 · 三阶 | `survival` | 3 | epic | survivability | `orbit-plate-2` | 否 | 第三面屏障，三面封顶。可与向矢偏转板同时存在，互不替代。 |
 | `salvo-duel` | 对消齐射 | `core` | 2 | rare | weapon | `overclock-rounds` | 否 | 我方弹体与敌方远程弹体相撞时双方同时湮灭。 |
 
 ## 角色被动技能
@@ -103,7 +107,7 @@
 
 - 首次获得某个局内升级后，会写入 `discoveredUpgradeIds`，用于技能图鉴。
 - 结算页会根据 `upgradeSequence` 渲染本轮构筑树。
-- 普通升级仍然是三选一，但中后期会更容易刷新到 `rare` 与 `epic`。
+- 普通升级仍然是三选一，但中后期会更容易刷新到 `rare` 与 `epic`。`mythic`（超神）仅可能出现在普通升级三选一，基础权重与稀有度倍率极低，需同时满足双传说前置（`phoenix-protocol` 与 `zero-point-lattice`）。
 - 击破复制体（引擎类型仍为 boss）后会立即弹出一次高阶奖励：
   - 常规复制体击破：弹出偏 `epic` 的**副本宝箱**三选一（`boss-epic`）
   - 每累计击破 3 次复制体：触发一次 `legendary` 传说奖励三选一（`boss-legendary`）

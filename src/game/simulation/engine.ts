@@ -1,5 +1,6 @@
 import { enemyDefinitions, getEnemySpawnMix } from "../content/enemies";
 import {
+  getBarrierOrbitSegmentCount,
   upgradeBranchLabels,
   upgradeDefinitions,
   upgradePool,
@@ -32,6 +33,9 @@ import {
   type Vec2,
   type RunMode
 } from "./types";
+
+/** 全局弹体射程系数（飞行时间秒）；小于 1 时等比例缩短敌我弹道最大距离 */
+const PROJECTILE_LIFE_GLOBAL_SCALE = 0.72;
 
 export type UiCommand =
   | { type: "start-run"; weaponId?: WeaponId; runMode?: RunMode }
@@ -101,7 +105,7 @@ export function updateSimulation(
   next = updateTutorialHint(next);
   next = checkDefeat(next);
 
-  return next;
+  return maybeFlushPendingStageLore(next);
 }
 
 function coolScreenFlash(state: SimulationState, deltaSeconds: number): SimulationState {
@@ -195,12 +199,12 @@ function applyCommand(state: SimulationState, command: UiCommand): SimulationSta
       return endRun(state, "cleared");
     case "dismiss-stage-lore":
       if (state.run.stageLore) {
-        return { ...state, run: { ...state.run, stageLore: null } };
+        return maybeFlushPendingStageLore({ ...state, run: { ...state.run, stageLore: null } });
       }
       return state;
     case "toggle-pause":
       if (state.run.stageLore) {
-        return { ...state, run: { ...state.run, stageLore: null } };
+        return maybeFlushPendingStageLore({ ...state, run: { ...state.run, stageLore: null } });
       }
       if (state.run.status === "running") {
         return { ...state, run: { ...state.run, status: "paused" } };
@@ -394,7 +398,18 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       player.visionRadius += 155;
       break;
     case "vector-plate":
-    case "orbit-plates":
+    case "orbit-plate-1":
+    case "orbit-plate-2":
+    case "orbit-plate-3":
+    case "ricochet-aegis":
+      break;
+    case "apex-sanctuary":
+      player.moveSpeed *= 1.06;
+      player.xpMultiplier *= 1.05;
+      player.fireRateMultiplier *= 2;
+      player.projectileSize *= 1.38;
+      player.apexInvulnRemaining = 0;
+      player.apexPulseCooldown = 8;
       break;
     case "salvo-duel":
       break;
@@ -471,8 +486,32 @@ function tickPlayer(state: SimulationState, deltaSeconds: number, input: InputSn
   if (aimLen > 0.12) {
     next.run.player.lastAimDirection = scale(input.aim, 1 / aimLen);
   }
-  if (next.run.appliedUpgrades.includes("orbit-plates")) {
+  if (getBarrierOrbitSegmentCount(next.run.appliedUpgrades) > 0) {
     next.run.player.barrierOrbitPhase = (next.run.player.barrierOrbitPhase ?? 0) + deltaSeconds * 1.25;
+  }
+
+  if (next.run.appliedUpgrades.includes("apex-sanctuary")) {
+    const APEX_INVULN_SEC = 2;
+    /** 无敌结束后的间隔秒数；与无敌合计为 10 秒一循环（2s 无敌 + 8s 间隔） */
+    const APEX_GAP_SEC = 8;
+    let inv = next.run.player.apexInvulnRemaining ?? 0;
+    let cd = next.run.player.apexPulseCooldown ?? 0;
+    if (inv > 0) {
+      inv -= deltaSeconds;
+      if (inv <= 0) {
+        inv = 0;
+        cd = APEX_GAP_SEC;
+      }
+    } else {
+      cd -= deltaSeconds;
+      if (cd <= 0) {
+        inv = APEX_INVULN_SEC;
+        cd = 0;
+        next.run.screenFlash = Math.max(next.run.screenFlash, 0.42);
+      }
+    }
+    next.run.player.apexInvulnRemaining = Math.max(0, inv);
+    next.run.player.apexPulseCooldown = Math.max(0, cd);
   }
 
   return next;
@@ -589,6 +628,11 @@ function createProjectile(
   const weaponLevelMultiplier = Math.max(1, player.weaponLevel);
   const speed = weapon.projectileSpeed * player.projectileSpeedMultiplier * (1 + (weaponLevelMultiplier - 1) * 0.04);
   const size = 5 * player.projectileSize;
+  let life = weapon.projectileLife * (1 + (player.projectileSize - 1) * 0.15);
+  if (state.run.appliedUpgrades.includes("apex-sanctuary")) {
+    life *= 2;
+  }
+  life *= PROJECTILE_LIFE_GLOBAL_SCALE;
 
   return {
     id: `p-${state.nextId + indexOffset}`,
@@ -596,7 +640,7 @@ function createProjectile(
     position: add(player.position, scale(direction, player.radius + 12)),
     velocity: scale(direction, speed),
     radius: size,
-    life: weapon.projectileLife * (1 + (player.projectileSize - 1) * 0.15),
+    life,
     damage:
       weapon.damage *
       (1 + (weaponLevelMultiplier - 1) * 0.12) *
@@ -724,12 +768,13 @@ function spawnBoss(
   const radiusScale =
     (pattern === "artillery" ? 1.42 : pattern === "charger" ? 1.28 : 1.55) * (options?.radiusMultiplier ?? 1);
   const lateBossHp =
-    1 + Math.min(1.2, state.run.bossDefeats * 0.1 + state.run.objective.stage * 0.032);
+    1 + Math.min(1.45, state.run.bossDefeats * 0.12 + state.run.objective.stage * 0.04);
   const hpScale =
     (pattern === "artillery" ? 1.14 : pattern === "charger" ? 1.06 : 1.26) *
     (options?.hpMultiplier ?? 1) *
     (1 + state.run.riskProtocolTier * 0.16) *
     lateBossHp;
+  const bossHp = definition.health * hpScale * 2;
   const enemy: EnemyState = {
     id: `e-${state.nextId}`,
     type: "boss",
@@ -738,8 +783,8 @@ function spawnBoss(
     position: resolveObstacleCollision(position, definition.radius * radiusScale, state.run.obstacles),
     velocity: { x: 0, y: 0 },
     radius: definition.radius * radiusScale,
-    hp: definition.health * hpScale,
-    maxHp: definition.health * hpScale,
+    hp: bossHp,
+    maxHp: bossHp,
     fireCooldown: pattern === "laser-prime" ? 0.55 : 0.7,
     skillCooldown: pattern === "laser-prime" ? 2 : 1.8,
     secondaryCooldown: pattern === "laser-prime" ? 4.2 : 3.4,
@@ -847,14 +892,16 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
         enemy.type === "boss" && enemyNext.chargeTimer > 0
           ? definition.contactDamage * 1.9
           : definition.contactDamage;
-      const damageResult = applyIncomingDamage(shield, hp, contactDamage * (1 - clamp(player.damageReduction, 0, 0.6)));
-      if (player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
-        skillCooldown = 14;
-        skillEffectTimer = 4.5;
-        screenFlash = Math.max(screenFlash, 0.72);
+      if (!isApexSanctuaryInvulnerable(state)) {
+        const damageResult = applyIncomingDamage(shield, hp, contactDamage * (1 - clamp(player.damageReduction, 0, 0.6)));
+        if (player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
+          skillCooldown = 14;
+          skillEffectTimer = 4.5;
+          screenFlash = Math.max(screenFlash, 0.72);
+        }
+        shield = damageResult.shield;
+        hp = damageResult.hp;
       }
-      shield = damageResult.shield;
-      hp = damageResult.hp;
       lastDamageSource =
         enemy.type === "boss"
           ? enemyNext.chargeTimer > 0
@@ -881,7 +928,7 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
         position: add(enemy.position, scale(shotDirection, enemy.radius + 8)),
         velocity: scale(shotDirection, 260),
         radius: 5,
-        life: 2.8,
+        life: 2.8 * PROJECTILE_LIFE_GLOBAL_SCALE,
         damage: 14,
         color: 0xff72c8,
         pierceLeft: 0,
@@ -968,7 +1015,7 @@ function updateBossSkills(
           position: add(enemy.position, scale(direction, enemy.radius + 12)),
           velocity: scale(direction, enemy.bossPattern === "artillery" ? 300 : 340),
           radius: enemy.bossPattern === "artillery" ? 7 : 6,
-          life: 3.2,
+          life: 3.2 * PROJECTILE_LIFE_GLOBAL_SCALE,
           damage: enemy.bossPattern === "artillery" ? 20 : 16,
           color: 0xff5c6f,
           pierceLeft: 0,
@@ -1025,7 +1072,7 @@ function updateBossSkills(
           position: add(enemy.position, scale(direction, enemy.radius + 12)),
           velocity: scale(direction, 255),
           radius: 6,
-          life: 3.2,
+          life: 3.2 * PROJECTILE_LIFE_GLOBAL_SCALE,
           damage: 17,
           color: 0x5cf8ff,
           pierceLeft: 0,
@@ -1170,22 +1217,18 @@ function isEnemyRangedProjectile(projectile: ProjectileState): boolean {
 
 function collectBarrierSegments(state: SimulationState): Array<{ a: Vec2; b: Vec2 }> {
   const upgrades = state.run.appliedUpgrades;
-  const hasOrbit = upgrades.includes("orbit-plates");
-  const hasAim = upgrades.includes("vector-plate");
-  if (!hasOrbit && !hasAim) {
-    return [];
-  }
   const pos = state.run.player.position;
   const p = state.run.player;
-  const dir = normalize(p.lastAimDirection);
   const segments: Array<{ a: Vec2; b: Vec2 }> = [];
 
-  if (hasOrbit) {
+  const orbitCount = getBarrierOrbitSegmentCount(upgrades);
+  if (orbitCount > 0) {
     const orbitR = 46;
     const halfW = 28;
     const phase = p.barrierOrbitPhase ?? 0;
-    for (let i = 0; i < 3; i += 1) {
-      const ang = phase + (i * Math.PI * 2) / 3;
+    const n = Math.max(1, Math.min(3, orbitCount));
+    for (let i = 0; i < n; i += 1) {
+      const ang = phase + (i * Math.PI * 2) / n;
       const rad = fromAngle(ang);
       const tan: Vec2 = { x: -rad.y, y: rad.x };
       const mid = add(pos, scale(rad, orbitR));
@@ -1194,16 +1237,19 @@ function collectBarrierSegments(state: SimulationState): Array<{ a: Vec2; b: Vec
         b: add(mid, scale(tan, halfW))
       });
     }
-    return segments;
   }
 
-  const mid = add(pos, scale(dir, 40));
-  const perp: Vec2 = { x: -dir.y, y: dir.x };
-  const halfW = 32;
-  segments.push({
-    a: add(mid, scale(perp, -halfW)),
-    b: add(mid, scale(perp, halfW))
-  });
+  if (upgrades.includes("vector-plate")) {
+    const dir = normalize(p.lastAimDirection);
+    const mid = add(pos, scale(dir, 40));
+    const perp: Vec2 = { x: -dir.y, y: dir.x };
+    const halfW = 32;
+    segments.push({
+      a: add(mid, scale(perp, -halfW)),
+      b: add(mid, scale(perp, halfW))
+    });
+  }
+
   return segments;
 }
 
@@ -1478,27 +1524,47 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
         isEnemyRangedProjectile(nextProjectile) &&
         projectileBlockedByBarriers(nextProjectile.position, nextProjectile.radius, state)
       ) {
-        pushHitEffect(hitEffects, nextId, {
-          position: { ...nextProjectile.position },
-          color: 0x8cf3ff,
-          weaponId: "pulse-blaster",
-          kind: "barrier-block",
-          ttl: 0.16
-        });
-        nextId += 1;
-        screenFlash = Math.max(screenFlash, 0.16);
-      } else if (distance(nextProjectile.position, state.run.player.position) <= nextProjectile.radius + state.run.player.radius) {
-        const damageResult = applyIncomingDamage(shield, hp, nextProjectile.damage * (1 - clamp(state.run.player.damageReduction, 0, 0.6)));
-        if (state.run.player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
-          skillCooldown = 14;
-          skillEffectTimer = 4.5;
-          screenFlash = Math.max(screenFlash, 0.72);
+        if (state.run.appliedUpgrades.includes("ricochet-aegis")) {
+          const reflected = createReflectedBarrierProjectile(nextId, nextProjectile.position, nextProjectile, enemies);
+          if (reflected) {
+            spawnedProjectiles.push(reflected);
+            nextId += 1;
+          }
+          pushHitEffect(hitEffects, nextId, {
+            position: { ...nextProjectile.position },
+            color: 0xff6a7a,
+            weaponId: "pulse-blaster",
+            kind: "ricochet-flash",
+            ttl: 0.22
+          });
+          nextId += 1;
+        } else {
+          pushHitEffect(hitEffects, nextId, {
+            position: { ...nextProjectile.position },
+            color: 0x8cf3ff,
+            weaponId: "pulse-blaster",
+            kind: "barrier-block",
+            ttl: 0.16
+          });
+          nextId += 1;
         }
-        shield = damageResult.shield;
-        hp = damageResult.hp;
-        lastDamageSource = "被远程火力压垮";
-        regenDelay = 4;
-        screenFlash = 1;
+        screenFlash = Math.max(screenFlash, 0.18);
+      } else if (distance(nextProjectile.position, state.run.player.position) <= nextProjectile.radius + state.run.player.radius) {
+        if (isApexSanctuaryInvulnerable(state)) {
+          screenFlash = Math.max(screenFlash, 0.22);
+        } else {
+          const damageResult = applyIncomingDamage(shield, hp, nextProjectile.damage * (1 - clamp(state.run.player.damageReduction, 0, 0.6)));
+          if (state.run.player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
+            skillCooldown = 14;
+            skillEffectTimer = 4.5;
+            screenFlash = Math.max(screenFlash, 0.72);
+          }
+          shield = damageResult.shield;
+          hp = damageResult.hp;
+          lastDamageSource = "被远程火力压垮";
+          regenDelay = 4;
+          screenFlash = 1;
+        }
       } else {
         remainingProjectiles.push(nextProjectile);
       }
@@ -1675,21 +1741,23 @@ function updateHazards(state: SimulationState, deltaSeconds: number): Simulation
 
     if (nextHazard.active && pointInHazard(state.run.player.position, state.run.player.radius, nextHazard)) {
       const damageScale = nextHazard.source === "boss" ? 1.2 : 1;
-      const damageResult = applyIncomingDamage(shield, hp, nextHazard.damagePerSecond * deltaSeconds * damageScale);
-      if (state.run.player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
-        skillCooldown = 14;
-        skillEffectTimer = 4.5;
-        screenFlash = Math.max(screenFlash, 0.72);
+      if (!isApexSanctuaryInvulnerable(state)) {
+        const damageResult = applyIncomingDamage(shield, hp, nextHazard.damagePerSecond * deltaSeconds * damageScale);
+        if (state.run.player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
+          skillCooldown = 14;
+          skillEffectTimer = 4.5;
+          screenFlash = Math.max(screenFlash, 0.72);
+        }
+        shield = damageResult.shield;
+        hp = damageResult.hp;
+        const bossHazardCause =
+          nextHazard.shape === "beam-v" || nextHazard.shape === "beam-h"
+            ? "被终幕复写的激光栅格吞没"
+            : "被复制体炮击区域吞没";
+        lastDamageSource = nextHazard.source === "boss" ? bossHazardCause : "在风暴区里持续失血";
+        regenDelay = 4;
+        screenFlash = Math.max(screenFlash, nextHazard.source === "boss" ? 0.72 : 0.28);
       }
-      shield = damageResult.shield;
-      hp = damageResult.hp;
-      const bossHazardCause =
-        nextHazard.shape === "beam-v" || nextHazard.shape === "beam-h"
-          ? "被终幕复写的激光栅格吞没"
-          : "被复制体炮击区域吞没";
-      lastDamageSource = nextHazard.source === "boss" ? bossHazardCause : "在风暴区里持续失血";
-      regenDelay = 4;
-      screenFlash = Math.max(screenFlash, nextHazard.source === "boss" ? 0.72 : 0.28);
     }
 
     return [nextHazard];
@@ -1743,7 +1811,7 @@ function updateExtraction(state: SimulationState, deltaSeconds: number, input: I
     return state;
   }
 
-  extraction.rewardMultiplier = 1 + clamp((state.run.time - 480) / 120, 0, 0.85) + state.run.riskProtocolTier * 0.32;
+  extraction.rewardMultiplier = 1 + clamp((state.run.time - 480) / 120, 0, 0.62) + state.run.riskProtocolTier * 0.28;
   const insideZone = distance(state.run.player.position, extraction.zoneCenter) <= extraction.radius;
   extraction.active = insideZone && input.interact;
   extraction.holdTimer = extraction.active ? extraction.holdTimer + deltaSeconds : Math.max(0, extraction.holdTimer - deltaSeconds * 1.5);
@@ -1966,7 +2034,7 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
       description: `再回收 ${target} 点能量碎片，稳定本区航道。`,
       target,
       progress: 0,
-      rewardShards: 18 + cycle * 4,
+      rewardShards: 15 + cycle * 3,
       rewardXp: 8 + cycle * 2,
       baselineTime: state.run.time,
       baselineBankedShards: state.run.bankedShards,
@@ -1987,7 +2055,7 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
       description: `击破 ${target} 个敌方目标，压低局部威胁。`,
       target,
       progress: 0,
-      rewardShards: 22 + cycle * 4,
+      rewardShards: 18 + cycle * 3,
       rewardXp: 10 + cycle * 2,
       baselineTime: state.run.time,
       baselineBankedShards: state.run.bankedShards,
@@ -2007,7 +2075,7 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
     description: `守住阵线 ${target} 秒，等待回收链路重连。`,
     target,
     progress: 0,
-    rewardShards: 20 + cycle * 5,
+    rewardShards: 17 + cycle * 4,
     rewardXp: 12 + cycle * 2,
     baselineTime: state.run.time,
     baselineBankedShards: state.run.bankedShards,
@@ -2101,11 +2169,14 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
         }
         const meta = upgradeTreeMeta[upgrade.id];
         if (meta.parents && !meta.parents.every((parentId) => state.run.appliedUpgrades.includes(parentId))) {
-          if (!relaxEpicParents || (upgrade.rarity !== "epic" && upgrade.rarity !== "legendary")) {
+          if (!relaxEpicParents || (upgrade.rarity !== "epic" && upgrade.rarity !== "legendary" && upgrade.rarity !== "mythic")) {
             return false;
           }
         }
         if (source === "boss-epic" && upgrade.rarity === "common") {
+          return false;
+        }
+        if (source === "boss-epic" && upgrade.rarity === "mythic") {
           return false;
         }
         // 传说副本箱：三选一必须全是传说卡（与「必出传说」文案一致）；史诗仅出现在 boss-epic
@@ -2120,15 +2191,22 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
       .map((upgrade) => {
         const meta = upgradeTreeMeta[upgrade.id];
         const sameBranchCount = state.run.appliedUpgrades.filter((upgradeId) => upgradeTreeMeta[upgradeId]?.branch === meta.branch).length;
-        const branchBias = sameBranchCount > 0 ? 1 + sameBranchCount * 0.28 : 1;
-        const stageBias = state.run.objective.stage >= meta.tier * 2 ? 1.12 : 0.88;
+        // 弱线路堆叠：避免「一路走到黑」压死其它分支，便于看到更多不同技能
+        const branchStackBias = 1 + Math.min(0.22, sameBranchCount * 0.065);
+        // 本局尚未点过该分支时略抬高，鼓励尝鲜
+        const freshBranchBias = sameBranchCount === 0 ? 1.14 : 1;
+        const branchBias = branchStackBias * freshBranchBias;
+        // 阶位与阶段略松绑，减少「永远先看到同一档」的体感
+        const stageBias = state.run.objective.stage >= meta.tier * 2 ? 1.06 : 0.94;
         const rarityBias =
           source === "level-up"
-            ? upgrade.rarity === "epic"
-              ? 1.28
-              : upgrade.rarity === "rare"
-                ? 1.16
-                : 0.94
+            ? upgrade.rarity === "mythic"
+              ? 0.012
+              : upgrade.rarity === "epic"
+                ? 1.28
+                : upgrade.rarity === "rare"
+                  ? 1.16
+                  : 0.94
             : source === "boss-epic"
               ? upgrade.rarity === "epic"
                 ? 1.95
@@ -2138,7 +2216,7 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
               : upgrade.rarity === "legendary"
                 ? 3.8
                 : 0.42;
-        const bossDefeatBias = source === "level-up" ? 1 + Math.min(0.24, state.run.bossDefeats * 0.06) : 1;
+        const bossDefeatBias = source === "level-up" ? 1 + Math.min(0.14, state.run.bossDefeats * 0.035) : 1;
         return {
           ...upgrade,
           weight: upgrade.weight * branchBias * stageBias * rarityBias * bossDefeatBias
@@ -2279,7 +2357,9 @@ function checkDefeat(state: SimulationState): SimulationState {
 
 function endRun(state: SimulationState, result: RunSummary["result"]): SimulationState {
   const successLike = result === "extracted" || result === "cleared";
-  const extractionBonus = (successLike ? state.run.extraction.rewardMultiplier : 0.55) * (1 + state.run.riskProtocolTier * 0.28);
+  /** 成功撤离/通关时略压低转入机库的积分，避免单局积分膨胀、开局补给显得过便宜 */
+  const SUCCESS_META_CREDITS_FACTOR = 0.84;
+  const extractionBonus = (successLike ? state.run.extraction.rewardMultiplier : 0.55) * (1 + state.run.riskProtocolTier * 0.26);
   const payout = Math.round(state.run.unbankedShards * extractionBonus * (successLike ? state.run.player.economyMultiplier : 0.45));
   const objectivesCompleted = Math.max(0, state.run.objective.stage - 1 + (state.run.objective.completed ? 1 : 0));
   const keyUpgradeIds = state.run.appliedUpgrades.filter((upgradeId) => upgradeId !== "weapon-tuning");
@@ -2304,7 +2384,9 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     weaponId: state.run.player.weaponId,
     weaponLevel: state.run.player.weaponLevel,
     riskProtocolTier: state.run.riskProtocolTier,
-    shardsBanked: successLike ? state.run.bankedShards + payout : payout,
+    shardsBanked: successLike
+      ? Math.max(0, Math.round((state.run.bankedShards + payout) * SUCCESS_META_CREDITS_FACTOR))
+      : payout,
     enemiesDestroyed: state.run.enemiesDestroyed,
     objectivesCompleted,
     highestStage: state.run.objective.stage,
@@ -2358,6 +2440,7 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
       ...state.run,
       status: "run-over",
       stageLore: null,
+      pendingStageLoreQueue: [],
       runOverDelay: result === "dead" ? 1 : 0,
       runSummary: summary,
       tutorialHint:
@@ -2483,6 +2566,38 @@ function applyExplosionDamage(
   });
 }
 
+function createReflectedBarrierProjectile(
+  nextId: number,
+  position: Vec2,
+  incoming: ProjectileState,
+  enemies: EnemyState[]
+): ProjectileState | null {
+  const target = findClosestEnemy(position, enemies, 560);
+  if (!target) {
+    return null;
+  }
+  const toTarget = normalize(subtract(target.position, position));
+  const inboundSpeed = Math.hypot(incoming.velocity.x, incoming.velocity.y);
+  const speed = Math.min(500, Math.max(210, inboundSpeed * 0.9));
+  return {
+    id: `p-refl-${nextId}`,
+    source: "player",
+    position: { ...position },
+    velocity: scale(toTarget, speed),
+    radius: Math.max(3.4, incoming.radius * 0.88),
+    life: Math.min(1.85, incoming.life + 0.35),
+    damage: Math.max(9, incoming.damage * 0.52),
+    color: 0xff5566,
+    pierceLeft: 1,
+    obstaclePierceLeft: 0,
+    explosiveRadius: 0,
+    ricochetLeft: 0,
+    obstacleRicochets: 0,
+    catacombBonusSpent: false,
+    homingStrength: 0.12
+  };
+}
+
 function createKillBurstProjectiles(nextId: number, position: Vec2, color: number, damage: number): ProjectileState[] {
   const burst: ProjectileState[] = [];
   for (let i = 0; i < 6; i += 1) {
@@ -2493,7 +2608,7 @@ function createKillBurstProjectiles(nextId: number, position: Vec2, color: numbe
       position: { ...position },
       velocity: scale(direction, 300),
       radius: 3.8,
-      life: 0.5,
+      life: 0.5 * PROJECTILE_LIFE_GLOBAL_SCALE,
       damage,
       color,
       pierceLeft: 0,
@@ -2525,15 +2640,58 @@ function createAnnouncement(
   };
 }
 
+/** Boss 离场且当前无叙事遮罩时，按队列补播被顺延的阶段打字机 */
+function maybeFlushPendingStageLore(state: SimulationState): SimulationState {
+  if (state.run.runMode !== "story") {
+    return state;
+  }
+  if (state.run.stageLore) {
+    return state;
+  }
+  if (state.run.enemies.some((enemy) => enemy.type === "boss")) {
+    return state;
+  }
+  const queue = state.run.pendingStageLoreQueue;
+  if (!queue || queue.length === 0) {
+    return state;
+  }
+  const [head, ...rest] = queue;
+  return {
+    ...state,
+    run: {
+      ...state.run,
+      stageLore: { stage: head.stage },
+      pendingStageLoreQueue: rest
+    }
+  };
+}
+
 function attachStoryStageLore(next: SimulationState): SimulationState {
   if (next.run.runMode !== "story") {
-    return { ...next, run: { ...next.run, stageLore: null } };
+    return { ...next, run: { ...next.run, stageLore: null, pendingStageLoreQueue: [] } };
   }
+  const stage = next.run.objective.stage;
+  const prevQueue = next.run.pendingStageLoreQueue ?? [];
+  // 场上存在 Boss 时不弹叙事，本阶段文案入队等待补播
+  if (next.run.enemies.some((enemy) => enemy.type === "boss")) {
+    return {
+      ...next,
+      run: {
+        ...next.run,
+        stageLore: null,
+        pendingStageLoreQueue: [...prevQueue, { stage }]
+      }
+    };
+  }
+  const queue = [...prevQueue, { stage }];
+  const head = queue[0];
+  const rest = queue.slice(1);
   return {
     ...next,
     run: {
       ...next.run,
-      stageLore: { stage: next.run.objective.stage }
+      stageLore: { stage: head.stage },
+      pendingStageLoreQueue: rest
     }
   };
 }
@@ -2765,6 +2923,12 @@ function createShard(nextId: number, position: Vec2, value: number, xpValue: num
     xpValue,
     radius: 6
   };
+}
+
+function isApexSanctuaryInvulnerable(state: SimulationState): boolean {
+  return (
+    state.run.appliedUpgrades.includes("apex-sanctuary") && (state.run.player.apexInvulnRemaining ?? 0) > 0
+  );
 }
 
 function applyIncomingDamage(shield: number, hp: number, damage: number): { shield: number; hp: number } {

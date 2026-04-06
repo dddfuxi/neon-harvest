@@ -1,7 +1,8 @@
 import Phaser from "phaser";
 
+import { getBarrierOrbitSegmentCount } from "../../game/content/upgrades";
 import { weaponDefinitions } from "../../game/content/weapons";
-import { InputController } from "../../game/input/bindings";
+import { getAimReticleWorldPosition, InputController } from "../../game/input/bindings";
 import { createEmptyInput } from "../../game/input/actions";
 import { assetManifest } from "../../game/assets/manifest";
 import { type UiCommand, updateSimulation } from "../../game/simulation/engine";
@@ -27,6 +28,7 @@ type SpriteRegistry = {
   player?: Phaser.GameObjects.Sprite;
   playerShield?: Phaser.GameObjects.Arc;
   barrierWards?: Phaser.GameObjects.Graphics;
+  aimReticle?: Phaser.GameObjects.Graphics;
   extraction?: Phaser.GameObjects.Sprite;
   extractionGlow?: Phaser.GameObjects.Arc;
   extractionArrow?: Phaser.GameObjects.Graphics;
@@ -102,6 +104,7 @@ export class GameScene extends Phaser.Scene {
     this.registryView.player = this.add.sprite(640, 360, getPlayerTextureKey("pulse-blaster")).setDepth(5);
     this.registryView.playerShield = this.add.circle(640, 360, 24).setStrokeStyle(3, 0x6cf3ff, 0.75).setFillStyle(0x6cf3ff, 0.05).setDepth(4.5);
     this.registryView.barrierWards = this.add.graphics().setDepth(4.85);
+    this.registryView.aimReticle = this.add.graphics().setDepth(5.91);
     this.registryView.extractionGlow = this.add
       .circle(1100, 110, 96, 0x6cf3ff, 0.1)
       .setStrokeStyle(5, 0xa8f5ff, 0.5)
@@ -193,23 +196,58 @@ export class GameScene extends Phaser.Scene {
     playerShield.setStrokeStyle(2 + shieldRatio * 2, weaponTint, 0.3 + shieldRatio * 0.55);
     playerShield.setFillStyle(weaponTint, 0.03 + shieldRatio * 0.08);
     playerShield.setVisible(shieldRatio > 0.02);
+
+    const aimG = this.registryView.aimReticle;
+    if (aimG) {
+      const showAimReticle = state.run.status === "running" && !state.run.stageLore;
+      if (showAimReticle) {
+        const px = state.run.player.position.x;
+        const py = state.run.player.position.y;
+        const pAim = state.run.player.lastAimDirection;
+        const reticlePos = getAimReticleWorldPosition(this, px, py, state.run.enemies, pAim);
+        const ring = weaponTint;
+        const tdx = reticlePos.x - px;
+        const tdy = reticlePos.y - py;
+        const tlen = Math.hypot(tdx, tdy);
+        const rdx = tlen > 0.02 ? tdx / tlen : pAim.x;
+        const rdy = tlen > 0.02 ? tdy / tlen : pAim.y;
+        aimG.clear();
+        aimG.lineStyle(2, ring, 0.92);
+        aimG.strokeCircle(reticlePos.x, reticlePos.y, 6);
+        aimG.lineStyle(1, 0xffffff, 0.45);
+        aimG.strokeCircle(reticlePos.x, reticlePos.y, 9);
+        aimG.lineStyle(1.5, ring, 0.4);
+        aimG.beginPath();
+        aimG.moveTo(px + rdx * 20, py + rdy * 20);
+        aimG.lineTo(reticlePos.x - rdx * 11, reticlePos.y - rdy * 11);
+        aimG.strokePath();
+        aimG.fillStyle(ring, 0.9);
+        aimG.fillCircle(reticlePos.x, reticlePos.y, 2);
+      } else {
+        aimG.clear();
+      }
+    }
+
     const barrierG = this.registryView.barrierWards;
     if (barrierG) {
       barrierG.clear();
       const applied = state.run.appliedUpgrades;
-      const hasOrbit = applied.includes("orbit-plates");
-      const hasAim = applied.includes("vector-plate") && !hasOrbit;
-      if (hasOrbit || hasAim) {
+      const hasRicochet = applied.includes("ricochet-aegis");
+      const segmentCount = getBarrierOrbitSegmentCount(applied);
+      const hasOrbitStyle = segmentCount > 0;
+      const hasVectorPlate = applied.includes("vector-plate");
+      if (hasOrbitStyle || hasVectorPlate) {
         const px = state.run.player.position.x;
         const py = state.run.player.position.y;
         const p = state.run.player;
-        barrierG.lineStyle(4, 0x9ae8ff, 0.88);
-        if (hasOrbit) {
+        if (hasOrbitStyle) {
+          barrierG.lineStyle(4, hasRicochet ? 0xff4d5c : 0x9ae8ff, hasRicochet ? 0.92 : 0.88);
           const orbitR = 46;
           const halfW = 28;
           const phase = p.barrierOrbitPhase ?? 0;
-          for (let i = 0; i < 3; i += 1) {
-            const ang = phase + (i * Math.PI * 2) / 3;
+          const n = Math.max(1, Math.min(3, segmentCount));
+          for (let i = 0; i < n; i += 1) {
+            const ang = phase + (i * Math.PI * 2) / n;
             const rx = Math.cos(ang);
             const ry = Math.sin(ang);
             const mx = px + rx * orbitR;
@@ -218,7 +256,9 @@ export class GameScene extends Phaser.Scene {
             const ty = rx;
             barrierG.lineBetween(mx - tx * halfW, my - ty * halfW, mx + tx * halfW, my + ty * halfW);
           }
-        } else {
+        }
+        if (hasVectorPlate) {
+          barrierG.lineStyle(4, 0x9ae8ff, 0.88);
           const d = p.lastAimDirection ?? { x: 1, y: 0 };
           const len = Math.hypot(d.x, d.y);
           const nx = len > 0.01 ? d.x / len : 1;

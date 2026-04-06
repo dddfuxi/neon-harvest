@@ -1,7 +1,7 @@
 import type { WeaponId } from "./weapons";
 
 export type UpgradeCategory = "weapon" | "survivability" | "mobility" | "economy";
-export type UpgradeRarity = "common" | "rare" | "epic" | "legendary";
+export type UpgradeRarity = "common" | "rare" | "epic" | "legendary" | "mythic";
 
 export type UpgradeId =
   | "weapon-tuning"
@@ -38,7 +38,11 @@ export type UpgradeId =
   | "survey-array"
   | "deep-radar"
   | "vector-plate"
-  | "orbit-plates"
+  | "orbit-plate-1"
+  | "orbit-plate-2"
+  | "orbit-plate-3"
+  | "ricochet-aegis"
+  | "apex-sanctuary"
   | "salvo-duel";
 
 export type UpgradeDefinition = {
@@ -434,15 +438,62 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
     weight: 0.72,
     once: true
   },
-  "orbit-plates": {
-    id: "orbit-plates",
-    title: "环轨盾阵",
-    description: "三面小型屏障绕机体公转，拦截敌方远程火力；与向矢偏转板同时持有时以环轨模式为准。无法阻挡近身攻击。",
+  "orbit-plate-1": {
+    id: "orbit-plate-1",
+    title: "环轨盾阵 · 一阶",
+    description:
+      "第一面小型屏障开始绕机体公转，可拦截敌方远程火力。与向矢偏转板可同时生效：向矢仍为瞄准朝向上的窄屏障，环轨段数独立计数。继续获取环轨阶位可增至三面；若已持有反弹盾，环轨段变为赤红反弹，阶位仍增加段数（至多三面）。无法阻挡近身攻击。",
+    category: "survivability",
+    rarity: "rare",
+    archetype: "旋转屏障",
+    tags: ["拦截", "公转"],
+    weight: 0.62,
+    once: true
+  },
+  "orbit-plate-2": {
+    id: "orbit-plate-2",
+    title: "环轨盾阵 · 二阶",
+    description: "第二面屏障加入公转，覆盖角度更大。仍需再取一阶才能达到三面上限。",
     category: "survivability",
     rarity: "epic",
     archetype: "旋转屏障",
     tags: ["拦截", "公转"],
-    weight: 0.48,
+    weight: 0.52,
+    once: true
+  },
+  "orbit-plate-3": {
+    id: "orbit-plate-3",
+    title: "环轨盾阵 · 三阶",
+    description: "三面屏障绕机体公转，拦截能力达到上限。可与向矢偏转板同时存在，互不替代。",
+    category: "survivability",
+    rarity: "epic",
+    archetype: "旋转屏障",
+    tags: ["拦截", "公转"],
+    weight: 0.46,
+    once: true
+  },
+  "apex-sanctuary": {
+    id: "apex-sanctuary",
+    title: "超神 · 空域圣约",
+    description:
+      "神话级空域协议：射速 +100%、子弹射程 +100%、弹体尺寸明显放大；常驻移速 +6%、经验 +5%。每 10 秒循环中有 2 秒完全无敌（近身、远程与危险区均不受伤）。普通升级池中极难出现。",
+    category: "survivability",
+    rarity: "mythic",
+    archetype: "时空火力",
+    tags: ["超神", "无敌", "火力"],
+    weight: 0.035,
+    once: true
+  },
+  "ricochet-aegis": {
+    id: "ricochet-aegis",
+    title: "反弹盾",
+    description:
+      "令环轨段变为赤红并附带反弹：拦截远程弹体时折返为友方弹体（伤害为原弹一部分）。段数由环轨盾阵阶位决定；无环轨阶位时仍获得 1 段环绕盾。向矢偏转板不受影响，仍为瞄准朝上的窄屏障，与环轨分开计算。近程弹体不受影响。",
+    category: "survivability",
+    rarity: "legendary",
+    archetype: "屏障反射",
+    tags: ["拦截", "反弹", "传说"],
+    weight: 0.36,
     once: true
   },
   "salvo-duel": {
@@ -505,6 +556,49 @@ export const upgradeTreeMeta: Record<UpgradeId, UpgradeTreeMeta> = {
   "survey-array": { branch: "scout", tier: 1, codexSummary: "扩大视野范围，让玩家更早读场。" },
   "deep-radar": { branch: "scout", tier: 2, parents: ["survey-array"], codexSummary: "进一步拉大视野，适合黑暗地图与远程打法。" },
   "vector-plate": { branch: "survival", tier: 2, parents: ["phase-cooling"], codexSummary: "瞄准朝向上的窄屏障，挡远程子弹。" },
-  "orbit-plates": { branch: "survival", tier: 3, parents: ["vector-plate"], codexSummary: "三面屏障绕体旋转，挡远程子弹。" },
+  "orbit-plate-1": { branch: "survival", tier: 2, parents: ["vector-plate"], codexSummary: "第一面绕体屏障，可再叠至三面。" },
+  "orbit-plate-2": { branch: "survival", tier: 3, parents: ["orbit-plate-1"], codexSummary: "第二面绕体屏障。" },
+  "orbit-plate-3": { branch: "survival", tier: 3, parents: ["orbit-plate-2"], codexSummary: "第三面绕体屏障，三面封顶。" },
+  "apex-sanctuary": {
+    branch: "survival",
+    tier: 3,
+    parents: ["phoenix-protocol", "zero-point-lattice"],
+    codexSummary: "高射速远距大弹体；10 秒循环 2 秒无敌；极难入池。"
+  },
+  "ricochet-aegis": {
+    branch: "survival",
+    tier: 3,
+    parents: ["vector-plate", "aegis-surge"],
+    codexSummary: "反弹远程弹；段数随环轨阶位增至三面，无阶位时单段。"
+  },
   "salvo-duel": { branch: "core", tier: 2, parents: ["overclock-rounds"], codexSummary: "敌我弹体相撞时相互抵消。" }
 };
+
+/** 环轨盾面数：按序获取一/二/三阶叠至三面封顶；旧版 `orbit-plates` 仍按三面计。 */
+export function getBarrierOrbitPlateCount(applied: readonly string[]): number {
+  if (applied.includes("orbit-plates")) {
+    return 3;
+  }
+  if (applied.includes("orbit-plate-3")) {
+    return 3;
+  }
+  if (applied.includes("orbit-plate-2")) {
+    return 2;
+  }
+  if (applied.includes("orbit-plate-1")) {
+    return 1;
+  }
+  return 0;
+}
+
+/**
+ * 环绕身体的环轨屏障段数（与向矢偏转板独立，可叠加）。
+ * 段数由环轨盾阵阶位决定；仅有反弹盾、尚未取得任何环轨阶位时为 1 段环绕。
+ */
+export function getBarrierOrbitSegmentCount(applied: readonly string[]): number {
+  const plates = getBarrierOrbitPlateCount(applied);
+  if (plates > 0) {
+    return Math.min(3, plates);
+  }
+  return applied.includes("ricochet-aegis") ? 1 : 0;
+}

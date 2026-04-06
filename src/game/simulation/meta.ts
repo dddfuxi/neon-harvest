@@ -43,35 +43,35 @@ export const preRunSupplyDefinitions: PreRunSupply[] = [
     id: "weapon-oil",
     name: "火控校准包",
     description: "开局武器等级 +1，只影响这一局的起步火力。",
-    cost: 28,
+    cost: 42,
     maxStock: 3
   },
   {
     id: "shield-pack",
     name: "护盾应急包",
     description: "开局额外恢复一段护盾，前期更容易站稳。",
-    cost: 24,
+    cost: 36,
     maxStock: 3
   },
   {
     id: "field-notes",
     name: "战场记录片",
     description: "开局获得额外经验，更快进入第一次升级。",
-    cost: 22,
+    cost: 34,
     maxStock: 3
   },
   {
     id: "emergency-repair",
     name: "应急修复单元",
     description: "本局死亡时自动抢修 1 次，把机体强行拉回战线。",
-    cost: 40,
+    cost: 58,
     maxStock: 2
   },
   {
     id: "risk-protocol",
     name: "风险协议",
     description: "本局提高威胁等级，敌群和危险区更强，但结算倍率同步上调。",
-    cost: 34,
+    cost: 50,
     maxStock: 3
   }
 ];

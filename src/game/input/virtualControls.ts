@@ -77,3 +77,8 @@ export function consumeVirtualControls(): Omit<VirtualControlState, "enabled"> {
   state.pauseQueued = false;
   return snapshot;
 }
+
+/** 渲染用：读取当前虚拟瞄准，不消费队列（与 {@link consumeVirtualControls} 成对使用）。 */
+export function peekVirtualAimState(): Pick<VirtualControlState, "aim" | "fire"> {
+  return { aim: { ...state.aim }, fire: state.fire };
+}

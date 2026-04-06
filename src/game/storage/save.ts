@@ -1,5 +1,6 @@
 import { createInitialState } from "../simulation/state";
 import type { RunSummary, SimulationState } from "../simulation/types";
+import type { UpgradeId } from "../content/upgrades";
 
 const STORAGE_KEY = "neon-harvest-save-v1";
 
@@ -66,6 +67,17 @@ export function loadState(): SimulationState {
       }
     }
 
+    let discoveredRaw = Array.isArray(mergedMeta.discoveredUpgradeIds) ? [...new Set(mergedMeta.discoveredUpgradeIds)] as string[] : [];
+    if (discoveredRaw.includes("orbit-plates")) {
+      discoveredRaw = discoveredRaw.filter((id) => id !== "orbit-plates");
+      for (const id of ["orbit-plate-1", "orbit-plate-2", "orbit-plate-3"] as const) {
+        if (!discoveredRaw.includes(id)) {
+          discoveredRaw.push(id);
+        }
+      }
+    }
+    const discovered = discoveredRaw as UpgradeId[];
+
     return {
       ...fallback,
       meta: {
@@ -73,7 +85,7 @@ export function loadState(): SimulationState {
         unlockedWeapons,
         purchasedWeaponModIds: Array.isArray(mergedMeta.purchasedWeaponModIds) ? [...new Set(mergedMeta.purchasedWeaponModIds)] : [],
         armoryMarks: typeof mergedMeta.armoryMarks === "number" && mergedMeta.armoryMarks >= 0 ? mergedMeta.armoryMarks : 0,
-        discoveredUpgradeIds: Array.isArray(mergedMeta.discoveredUpgradeIds) ? [...new Set(mergedMeta.discoveredUpgradeIds)] : [],
+        discoveredUpgradeIds: discovered,
         skillFeedbackClientId:
           typeof mergedMeta.skillFeedbackClientId === "string" && mergedMeta.skillFeedbackClientId
             ? mergedMeta.skillFeedbackClientId

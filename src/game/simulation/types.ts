@@ -53,6 +53,10 @@ export type PlayerState = {
   lastAimDirection: Vec2;
   /** 环轨盾阵公转角速度积分（弧度） */
   barrierOrbitPhase: number;
+  /** 超神 · 空域圣约：当前无敌剩余秒数 */
+  apexInvulnRemaining: number;
+  /** 超神 · 空域圣约：距下一次无敌触发剩余秒数（无敌结束后重新计时） */
+  apexPulseCooldown: number;
 };
 
 export type BossPattern = "artillery" | "charger" | "laser-prime";
@@ -325,6 +329,8 @@ export type RunState = {
   storyArcComplete: boolean;
   /** 战役叙事：存在时冻结战斗，直至玩家关闭（仅 story） */
   stageLore: null | { stage: number };
+  /** 因场上 Boss 而顺延的阶段叙事，Boss 离场后按 FIFO 补播（仅 story） */
+  pendingStageLoreQueue: Array<{ stage: number }>;
 };
 
 export type SimulationState = {

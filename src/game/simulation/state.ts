@@ -52,7 +52,9 @@ function createPlayerState(
     skillCooldown: 0,
     skillEffectTimer: 0,
     lastAimDirection: { x: 1, y: 0 },
-    barrierOrbitPhase: 0
+    barrierOrbitPhase: 0,
+    apexInvulnRemaining: 0,
+    apexPulseCooldown: 0
   };
 }
 
@@ -117,7 +119,7 @@ function createRunObjective(
       description: `\u518d\u56de\u6536 ${target} \u70b9\u80fd\u91cf\u788e\u7247\uff0c\u7a33\u5b9a\u672c\u533a\u822a\u9053\u3002`,
       target,
       progress: 0,
-      rewardShards: 18 + cycle * 4,
+      rewardShards: 15 + cycle * 3,
       rewardXp: 6 + cycle * 2,
       baselineTime: time,
       baselineBankedShards: bankedShards,
@@ -138,7 +140,7 @@ function createRunObjective(
       description: `\u51fb\u7834 ${target} \u4e2a\u654c\u65b9\u76ee\u6807\uff0c\u538b\u4f4e\u5c40\u90e8\u5a01\u80c1\u3002`,
       target,
       progress: 0,
-      rewardShards: 22 + cycle * 4,
+      rewardShards: 18 + cycle * 3,
       rewardXp: 8 + cycle * 2,
       baselineTime: time,
       baselineBankedShards: bankedShards,
@@ -158,7 +160,7 @@ function createRunObjective(
     description: `\u5b88\u4f4f\u9635\u7ebf ${target} \u79d2\uff0c\u7b49\u5f85\u56de\u6536\u94fe\u8def\u91cd\u8fde\u3002`,
     target,
     progress: 0,
-    rewardShards: 20 + cycle * 5,
+    rewardShards: 17 + cycle * 4,
     rewardXp: 10 + cycle * 2,
     baselineTime: time,
     baselineBankedShards: bankedShards,
@@ -259,7 +261,8 @@ export function createInitialState(): SimulationState {
       runSummary: null,
       runMode: "infinite",
       storyArcComplete: false,
-      stageLore: null
+      stageLore: null,
+      pendingStageLoreQueue: []
     },
     meta: { ...defaultMetaState },
     rngSeed: 1337,
@@ -381,7 +384,8 @@ export function createRunState(
       runSummary: null,
       runMode,
       storyArcComplete: false,
-      stageLore: runMode === "story" ? { stage: 1 } : null
+      stageLore: runMode === "story" ? { stage: 1 } : null,
+      pendingStageLoreQueue: []
     }
   };
 }

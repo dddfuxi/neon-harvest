@@ -54,7 +54,7 @@ export const enemyDefinitions: Record<EnemyType, EnemyDefinition> = {
     name: "Apex Harvester",
     radius: 34,
     speed: 74,
-    health: 760,
+    health: 1020,
     contactDamage: 32,
     rangedCooldown: 4.2,
     shardDrop: 120,
