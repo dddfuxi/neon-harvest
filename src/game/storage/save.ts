@@ -72,6 +72,7 @@ export function loadState(): SimulationState {
         ...mergedMeta,
         unlockedWeapons,
         purchasedWeaponModIds: Array.isArray(mergedMeta.purchasedWeaponModIds) ? [...new Set(mergedMeta.purchasedWeaponModIds)] : [],
+        armoryMarks: typeof mergedMeta.armoryMarks === "number" && mergedMeta.armoryMarks >= 0 ? mergedMeta.armoryMarks : 0,
         discoveredUpgradeIds: Array.isArray(mergedMeta.discoveredUpgradeIds) ? [...new Set(mergedMeta.discoveredUpgradeIds)] : [],
         skillFeedbackClientId:
           typeof mergedMeta.skillFeedbackClientId === "string" && mergedMeta.skillFeedbackClientId

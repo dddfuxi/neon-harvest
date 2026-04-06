@@ -48,6 +48,7 @@ export class GameScene extends Phaser.Scene {
   private deathFxObjects: Phaser.GameObjects.GameObject[] = [];
   private seenHitEffectIds = new Set<string>();
   private previousAnnouncementId: string | null = null;
+  private lastBossRewardRevealKey: string | null = null;
   private registryView: SpriteRegistry = {
     obstacles: new Map(),
     hazards: new Map(),
@@ -1194,6 +1195,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private playAnnouncementPulse(state: SimulationState): void {
+    if (state.run.status !== "level-up") {
+      this.lastBossRewardRevealKey = null;
+    }
+
     const nextAnnouncementId = state.run.announcement?.id ?? null;
     if (!nextAnnouncementId || nextAnnouncementId === this.previousAnnouncementId) {
       this.previousAnnouncementId = nextAnnouncementId;
@@ -1201,7 +1206,11 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (state.run.status === "level-up" && state.run.upgradeOfferSource !== "level-up") {
-      this.playBossRewardReveal(state.run.upgradeOfferSource);
+      const fxKey = `${state.run.upgradeOfferSource}:${nextAnnouncementId}:${state.run.offeredUpgrades.join(",")}`;
+      if (fxKey !== this.lastBossRewardRevealKey) {
+        this.lastBossRewardRevealKey = fxKey;
+        this.playBossRewardReveal(state.run.upgradeOfferSource);
+      }
       this.previousAnnouncementId = nextAnnouncementId;
       return;
     }
@@ -1228,8 +1237,13 @@ export class GameScene extends Phaser.Scene {
     const primaryColor = isLegendary ? 0xffc46b : 0xff6aa8;
     const accentColor = isLegendary ? 0xfff0b3 : 0xffffff;
 
-    this.cameras.main.flash(isLegendary ? 260 : 200, isLegendary ? 255 : 255, isLegendary ? 196 : 106, isLegendary ? 107 : 168, false);
-    this.cameras.main.shake(isLegendary ? 260 : 190, isLegendary ? 0.0048 : 0.0034);
+    if (isLegendary) {
+      this.cameras.main.flash(48, 32, 28, 22, false);
+      this.cameras.main.shake(120, 0.0018);
+    } else {
+      this.cameras.main.flash(200, 255, 106, 168, false);
+      this.cameras.main.shake(190, 0.0034);
+    }
 
     const ring = this.add.circle(centerX, centerY, 42, primaryColor, isLegendary ? 0.22 : 0.16).setScrollFactor(0).setDepth(9.7);
     this.tweens.add({

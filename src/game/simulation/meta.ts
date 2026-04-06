@@ -24,6 +24,7 @@ export const metaUpgrades: MetaUpgrade[] = [
 
 export const defaultMetaState: MetaProgressState = {
   credits: 0,
+  armoryMarks: 0,
   unlockedWeapons: ["pulse-blaster", "arc-caster", "rift-carbine"],
   dashVariantUnlocked: false,
   unlockedUpgradeIds: [],
@@ -134,6 +135,11 @@ export function buyPreRunSupply(meta: MetaProgressState, supplyId: PreRunSupplyI
   };
 }
 
+/** 武器库改装消耗：按改装阶位 1/2/3 点通关印记 */
+export function armoryMarksCostForMod(mod: { tier: number }): number {
+  return Math.max(1, Math.min(3, mod.tier));
+}
+
 export function buyWeaponMod(meta: MetaProgressState, weaponId: WeaponId, modId: WeaponModId): MetaProgressState {
   if (meta.purchasedWeaponModIds.includes(modId)) {
     return meta;
@@ -144,7 +150,13 @@ export function buyWeaponMod(meta: MetaProgressState, weaponId: WeaponId, modId:
   }
 
   const mod = weaponModDefinitions[modId];
-  if (!mod || mod.weaponId !== weaponId || meta.credits < mod.cost) {
+  if (!mod || mod.weaponId !== weaponId) {
+    return meta;
+  }
+
+  const markCost = armoryMarksCostForMod(mod);
+  const marks = meta.armoryMarks ?? 0;
+  if (marks < markCost) {
     return meta;
   }
 
@@ -159,7 +171,7 @@ export function buyWeaponMod(meta: MetaProgressState, weaponId: WeaponId, modId:
 
   return {
     ...meta,
-    credits: meta.credits - mod.cost,
+    armoryMarks: marks - markCost,
     purchasedWeaponModIds: [...meta.purchasedWeaponModIds, modId]
   };
 }

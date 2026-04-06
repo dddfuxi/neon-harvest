@@ -12,7 +12,7 @@ import {
 import { upgradeBranchLabels, upgradeDefinitions, upgradeTreeMeta, type UpgradeBranch, type UpgradeId } from "../game/content/upgrades";
 import { weaponDefinitions, type WeaponId } from "../game/content/weapons";
 import { type UiCommand } from "../game/simulation/engine";
-import { metaUpgrades, preRunSupplyDefinitions } from "../game/simulation/meta";
+import { armoryMarksCostForMod, metaUpgrades, preRunSupplyDefinitions } from "../game/simulation/meta";
 import { clearPersistedState, loadState, persistState } from "../game/storage/save";
 import {
   STORY_FINAL_STAGE,
@@ -909,6 +909,12 @@ function renderModal(
   }
 
   if (state.run.status === "level-up") {
+    const discovered = new Set(state.meta.discoveredUpgradeIds);
+    const firstEncounterIds = state.run.offeredUpgrades.filter((id) => !discovered.has(id));
+    const firstEncounterBanner =
+      firstEncounterIds.length > 0
+        ? `<p class="first-obtain-banner" role="status">首次遭遇：下列强化尚未写入图鉴，确认领取后即视为已获取。</p>`
+        : "";
     const isLegendaryReward = state.run.upgradeOfferSource === "boss-legendary";
     const offerTitle =
       state.run.upgradeOfferSource === "boss-legendary"
@@ -932,6 +938,7 @@ function renderModal(
         <p class="label">${state.run.upgradeOfferSource === "level-up" ? "构筑升级" : "副本奖励"}</p>
         <h2 class="screen-title compact">${offerTitle}</h2>
         <p class="screen-subtitle">${offerSubtitle}</p>
+        ${firstEncounterBanner}
         ${
           shouldShowLegendaryCore
             ? `
@@ -952,7 +959,7 @@ function renderModal(
                   .map((upgradeId, index) => {
                     const upgrade = upgradeDefinitions[upgradeId];
                     return `
-                      <article class="choice-card rarity-${upgrade.rarity} ${isLegendaryReward ? "legendary-reward-card" : ""}" style="${isLegendaryReward ? `--entry-delay:${index * 90}ms` : ""}">
+                      <article class="choice-card rarity-${upgrade.rarity} ${isLegendaryReward ? "legendary-reward-card" : ""} ${firstEncounterIds.includes(upgradeId) ? "choice-card--first-encounter" : ""}" style="${isLegendaryReward ? `--entry-delay:${index * 90}ms` : ""}">
                         <div class="choice-meta">
                           <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
                           <span class="rarity-type">${categoryMap[upgrade.category]}</span>
@@ -1020,6 +1027,7 @@ function renderModal(
         <p class="screen-subtitle">机库里的改装是你的<strong>人类资产底牌</strong>，拉高开局质量；真正跟技能模型对线的，仍是局内构筑与临场操作。</p>
         <div class="summary-grid">
           <div class="panel"><span class="label">积分</span><div class="value">${state.meta.credits}</div></div>
+          <div class="panel"><span class="label">通关印记</span><div class="value">${state.meta.armoryMarks ?? 0}</div></div>
           <div class="panel"><span class="label">已解锁武器</span><div class="value">${state.meta.unlockedWeapons.length}</div></div>
           <div class="panel"><span class="label">上次结果</span><div class="value">${summary ? translateResult(summary.result) : "暂无"}</div></div>
         </div>
@@ -1134,15 +1142,17 @@ function renderWeaponArmoryTree(state: SimulationState, weaponId: WeaponId): str
         <span class="label">武器库改装</span>
         <strong>${weapon.name} 改装树</strong>
       </div>
-      <p class="body-copy">每个改装节点只能购买一次。解锁后会作为局外永久改装，在使用这把武器开局时直接生效。</p>
+      <p class="body-copy">每个改装节点只能兑换一次，消耗<strong>通关印记</strong>（战役通关结算，或故事模式推进至第 12 阶段后成功撤离）。解锁后作为局外永久改装，使用该武器开局时直接生效。</p>
       <div class="armory-tree-grid">
         ${mods
           .map((mod) => {
             const bought = purchased.has(mod.id);
             const unlocked = !mod.parents || mod.parents.every((parentId) => purchased.has(parentId));
-            const afford = state.meta.credits >= mod.cost;
+            const markCost = armoryMarksCostForMod(mod);
+            const marks = state.meta.armoryMarks ?? 0;
+            const afford = marks >= markCost;
             const disabled = bought || !unlocked || !afford;
-            const stateLabel = bought ? "已改装" : unlocked ? (afford ? `${mod.cost} 积分` : `需要 ${mod.cost} 积分`) : "需要前置改装";
+            const stateLabel = bought ? "已改装" : unlocked ? (afford ? `${markCost} 印记` : `需要 ${markCost} 印记`) : "需要前置改装";
             return `
               <article class="armory-node tier-${mod.tier} ${bought ? "purchased" : unlocked ? "available" : "locked"}">
                 <span class="armory-node-tier">T${mod.tier}</span>

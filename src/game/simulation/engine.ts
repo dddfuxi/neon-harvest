@@ -723,10 +723,13 @@ function spawnBoss(
   const position = add(state.run.player.position, scale(fromAngle(angle), 420));
   const radiusScale =
     (pattern === "artillery" ? 1.42 : pattern === "charger" ? 1.28 : 1.55) * (options?.radiusMultiplier ?? 1);
+  const lateBossHp =
+    1 + Math.min(1.2, state.run.bossDefeats * 0.1 + state.run.objective.stage * 0.032);
   const hpScale =
     (pattern === "artillery" ? 1.14 : pattern === "charger" ? 1.06 : 1.26) *
     (options?.hpMultiplier ?? 1) *
-    (1 + state.run.riskProtocolTier * 0.16);
+    (1 + state.run.riskProtocolTier * 0.16) *
+    lateBossHp;
   const enemy: EnemyState = {
     id: `e-${state.nextId}`,
     type: "boss",
@@ -754,7 +757,7 @@ function spawnBoss(
     run: {
       ...state.run,
       enemies: [...state.run.enemies, enemy],
-      screenFlash: 1
+      screenFlash: 0.62
     }
   };
 }
@@ -1131,7 +1134,7 @@ function maybeOfferPendingBossReward(state: SimulationState): SimulationState {
         legendaryReady ? "boss" : "upgrade",
         4
       ),
-      screenFlash: Math.max(state.run.screenFlash, legendaryReady ? 1 : 0.9)
+      screenFlash: Math.max(state.run.screenFlash, legendaryReady ? 0.16 : 0.85)
     }
   };
 }
@@ -2311,6 +2314,12 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     deathReason,
     extractionBonus
   };
+  const armoryMarksGain =
+    result === "cleared"
+      ? 1
+      : result === "extracted" && state.run.runMode === "story" && summary.highestStage >= STORY_FINAL_STAGE
+        ? 1
+        : 0;
   const leaderboardEntry = {
     id: `lb-${state.nextId}-${Math.floor(state.run.time)}`,
     recordedAt: Date.now(),
@@ -2334,11 +2343,14 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     })
     .slice(0, 10);
 
+  const armoryLine = armoryMarksGain > 0 ? ` 获得通关印记 +${armoryMarksGain}（可在机库兑换武器库改装）。` : "";
+
   return {
     ...state,
     meta: {
       ...state.meta,
       credits: state.meta.credits + summary.shardsBanked,
+      armoryMarks: (state.meta.armoryMarks ?? 0) + armoryMarksGain,
       lastRunSummary: summary,
       leaderboard
     },
@@ -2350,9 +2362,9 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
       runSummary: summary,
       tutorialHint:
         result === "extracted"
-          ? `本轮成功撤离。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`
+          ? `本轮成功撤离。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。${armoryLine}`
           : result === "cleared"
-            ? `本轮战役通关结算。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`
+            ? `本轮战役通关结算。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。${armoryLine}`
             : `本轮机体损毁。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`,
       bankedShards: summary.shardsBanked,
       unbankedShards: 0,

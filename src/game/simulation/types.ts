@@ -266,6 +266,8 @@ export type MetaUpgrade = {
 
 export type MetaProgressState = {
   credits: number;
+  /** 通关印记：战役通关或故事模式高阶段撤离时获得，仅用于武器库改装 */
+  armoryMarks: number;
   unlockedWeapons: WeaponId[];
   dashVariantUnlocked: boolean;
   unlockedUpgradeIds: UpgradeId[];
