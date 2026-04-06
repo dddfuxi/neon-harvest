@@ -3,7 +3,7 @@ import { characterSkillPool } from "../content/skills";
 import { weaponModDefinitions } from "../content/weapons";
 import { distance } from "./math";
 import { randomChoice, randomFloat } from "./random";
-import type { PlayerState, RunObjectiveState, RunTheme, SimulationState } from "./types";
+import { STORY_FINAL_STAGE, type PlayerState, type RunMode, type RunObjectiveState, type RunTheme, type SimulationState } from "./types";
 
 function createPlayerState(
   weaponId: PlayerState["weaponId"],
@@ -67,17 +67,47 @@ function getThemeForStage(stage: number): RunTheme {
   return "skirmish";
 }
 
+/**
+ * 战役模式单阶段目标更高，拉长每节停留，方便读完叙事；清剿模式保持原数值。
+ */
+export function getObjectiveTargetForStage(
+  stage: number,
+  kind: "collect-shards" | "defeat-enemies" | "survive",
+  runMode: RunMode
+): number {
+  const cycle = Math.max(0, stage - 1);
+  let base: number;
+  if (kind === "collect-shards") {
+    base = 26 + Math.floor(cycle / 3) * 10;
+  } else if (kind === "defeat-enemies") {
+    base = 8 + Math.floor(cycle / 3) * 3;
+  } else {
+    base = 24 + Math.floor(cycle / 3) * 6;
+  }
+  if (runMode !== "story") {
+    return base;
+  }
+  if (kind === "collect-shards") {
+    return Math.round(base * 1.55) + 8;
+  }
+  if (kind === "defeat-enemies") {
+    return Math.round(base * 1.48) + 4;
+  }
+  return Math.round(base * 1.4) + 14;
+}
+
 function createRunObjective(
   stage: number,
   time: number,
   bankedShards: number,
-  enemiesDestroyed: number
+  enemiesDestroyed: number,
+  runMode: RunMode = "infinite"
 ): RunObjectiveState {
   const cycle = Math.max(0, stage - 1);
   const kindIndex = cycle % 3;
 
   if (kindIndex === 0) {
-    const target = 26 + Math.floor(cycle / 3) * 10;
+    const target = getObjectiveTargetForStage(stage, "collect-shards", runMode);
     return {
       id: `objective-${stage}`,
       stage,
@@ -98,7 +128,7 @@ function createRunObjective(
   }
 
   if (kindIndex === 1) {
-    const target = 8 + Math.floor(cycle / 3) * 3;
+    const target = getObjectiveTargetForStage(stage, "defeat-enemies", runMode);
     return {
       id: `objective-${stage}`,
       stage,
@@ -118,7 +148,7 @@ function createRunObjective(
     };
   }
 
-  const target = 24 + Math.floor(cycle / 3) * 6;
+  const target = getObjectiveTargetForStage(stage, "survive", runMode);
   return {
     id: `objective-${stage}`,
     stage,
@@ -190,7 +220,7 @@ export function createInitialState(): SimulationState {
       hazards: [],
       hitEffects: [],
       announcement: null,
-      objective: createRunObjective(1, 0, 0, 0),
+      objective: createRunObjective(1, 0, 0, 0, "infinite"),
       stageTheme: getThemeForStage(1),
       extraction: {
         unlocked: false,
@@ -226,7 +256,10 @@ export function createInitialState(): SimulationState {
       lastDamageSource: "",
       tutorialHint: "\u7528 WASD \u79fb\u52a8\uff0c\u7528\u9f20\u6807\u7784\u51c6\uff0c\u5148\u7a33\u4f4f\u9635\u811a\u7b49\u5f85\u64a4\u79bb\u7a97\u53e3\u5f00\u542f\u3002",
       screenFlash: 0,
-      runSummary: null
+      runSummary: null,
+      runMode: "infinite",
+      storyArcComplete: false,
+      stageLore: null
     },
     meta: { ...defaultMetaState },
     rngSeed: 1337,
@@ -234,7 +267,11 @@ export function createInitialState(): SimulationState {
   };
 }
 
-export function createRunState(previous: SimulationState, weaponId?: PlayerState["weaponId"]): SimulationState {
+export function createRunState(
+  previous: SimulationState,
+  weaponId?: PlayerState["weaponId"],
+  runMode: RunMode = "story"
+): SimulationState {
   const chosenWeapon = weaponId ?? previous.meta.unlockedWeapons[0] ?? "pulse-blaster";
   const skillRoll = randomChoice(previous.rngSeed, characterSkillPool);
   const basePlayer = applyWeaponArmoryMods(
@@ -300,7 +337,7 @@ export function createRunState(previous: SimulationState, weaponId?: PlayerState
       hazards: [],
       hitEffects: [],
       announcement: null,
-      objective: createRunObjective(1, 0, 0, 0),
+      objective: createRunObjective(1, 0, 0, 0, runMode),
       stageTheme: getThemeForStage(1),
       extraction: {
         unlocked: false,
@@ -335,11 +372,16 @@ export function createRunState(previous: SimulationState, weaponId?: PlayerState
       riskProtocolTier,
       lastDamageSource: "",
       tutorialHint:
-        activatedSupplies.length > 0
-          ? `起始补给已生效：${activatedSupplies.join(" · ")}。先稳住第一轮阵线。`
-          : "\u5148\u505a\u51fa\u7b2c\u4e00\u8f6e\u6218\u6597\u6784\u7b51\uff0c\u4e4b\u540e\u518d\u51b3\u5b9a\u662f\u7ee7\u7eed\u63a8\u8fdb\u8fd8\u662f\u64a4\u79bb\u3002",
+        runMode === "story"
+          ? `${activatedSupplies.length > 0 ? `起始补给已生效：${activatedSupplies.join(" · ")}。` : ""}战役模式：完成第 ${STORY_FINAL_STAGE} 阶段任务可通关；约 8 分钟后地图上将出现撤离信标，前往高亮区长按交互键撤离。`.trim()
+          : activatedSupplies.length > 0
+            ? `起始补给已生效：${activatedSupplies.join(" · ")}。先稳住第一轮阵线。`
+            : "\u5148\u505a\u51fa\u7b2c\u4e00\u8f6e\u6218\u6597\u6784\u7b51\uff0c\u4e4b\u540e\u518d\u51b3\u5b9a\u662f\u7ee7\u7eed\u63a8\u8fdb\u8fd8\u662f\u64a4\u79bb\u3002",
       screenFlash: 0,
-      runSummary: null
+      runSummary: null,
+      runMode,
+      storyArcComplete: false,
+      stageLore: runMode === "story" ? { stage: 1 } : null
     }
   };
 }

@@ -28,6 +28,8 @@ type SpriteRegistry = {
   playerShield?: Phaser.GameObjects.Arc;
   barrierWards?: Phaser.GameObjects.Graphics;
   extraction?: Phaser.GameObjects.Sprite;
+  extractionGlow?: Phaser.GameObjects.Arc;
+  extractionArrow?: Phaser.GameObjects.Graphics;
   bossRewardChest?: Phaser.GameObjects.Sprite;
   obstacles: Map<string, Phaser.GameObjects.Shape>;
   hazards: Map<string, Phaser.GameObjects.Arc>;
@@ -99,7 +101,13 @@ export class GameScene extends Phaser.Scene {
     this.registryView.player = this.add.sprite(640, 360, getPlayerTextureKey("pulse-blaster")).setDepth(5);
     this.registryView.playerShield = this.add.circle(640, 360, 24).setStrokeStyle(3, 0x6cf3ff, 0.75).setFillStyle(0x6cf3ff, 0.05).setDepth(4.5);
     this.registryView.barrierWards = this.add.graphics().setDepth(4.85);
+    this.registryView.extractionGlow = this.add
+      .circle(1100, 110, 96, 0x6cf3ff, 0.1)
+      .setStrokeStyle(5, 0xa8f5ff, 0.5)
+      .setDepth(4.35)
+      .setVisible(false);
     this.registryView.extraction = this.add.sprite(1100, 110, "fx/extraction").setAlpha(0.35).setVisible(false);
+    this.registryView.extractionArrow = this.add.graphics().setDepth(8.5);
     this.registryView.bossRewardChest = this.add.sprite(0, 0, "fx/boss-reward-chest").setAlpha(0.9).setVisible(false).setDepth(4.9);
 
     this.inputController = new InputController(this);
@@ -117,12 +125,21 @@ export class GameScene extends Phaser.Scene {
     }
 
     const commands = this.callbacks.flushCommands();
-    const input =
-      this.inputController && current.run.status === "running"
-        ? this.inputController.snapshot(current.run.player.position.x, current.run.player.position.y, current.run.enemies)
-        : createEmptyInput();
+    const running = current.run.status === "running";
+    let input = createEmptyInput();
+    if (running && this.inputController) {
+      const snap = this.inputController.snapshot(current.run.player.position.x, current.run.player.position.y, current.run.enemies);
+      if (current.run.stageLore) {
+        if (snap.pause) {
+          commands.push({ type: "dismiss-stage-lore" });
+        }
+        input = createEmptyInput();
+      } else {
+        input = snap;
+      }
+    }
 
-    if (input.pause && current.run.status === "running") {
+    if (input.pause && running && !current.run.stageLore) {
       commands.push({ type: "toggle-pause" });
     }
 
@@ -230,11 +247,69 @@ export class GameScene extends Phaser.Scene {
     }
 
     const extraction = this.registryView.extraction!;
+    const extractionGlow = this.registryView.extractionGlow;
+    const extractionArrow = this.registryView.extractionArrow;
     extraction.setVisible(state.run.extraction.unlocked);
     extraction.setPosition(state.run.extraction.zoneCenter.x, state.run.extraction.zoneCenter.y);
-    extraction.setScale(state.run.extraction.radius / 40);
-    extraction.setAlpha(state.run.extraction.active ? 0.95 : 0.38);
+    extraction.setScale((state.run.extraction.radius / 40) * 1.12);
+    extraction.setAlpha(state.run.extraction.active ? 1 : 0.52);
     extraction.setAngle(extraction.angle + 0.5);
+    if (extractionGlow) {
+      extractionGlow.setVisible(state.run.extraction.unlocked);
+      if (state.run.extraction.unlocked) {
+        const pulse = Math.sin(this.time.now / 220) * 0.04;
+        extractionGlow.setPosition(state.run.extraction.zoneCenter.x, state.run.extraction.zoneCenter.y);
+        extractionGlow.setRadius(state.run.extraction.radius * 1.22 + pulse * 40);
+        extractionGlow.setFillStyle(0x6cf3ff, 0.1 + pulse * 0.5);
+        extractionGlow.setStrokeStyle(5, 0xa8f5ff, 0.45 + pulse * 0.35);
+      }
+    }
+    if (extractionArrow) {
+      extractionArrow.clear();
+      if (state.run.extraction.unlocked) {
+        const cam = this.cameras.main;
+        const view = cam.worldView;
+        const zx = state.run.extraction.zoneCenter.x;
+        const zy = state.run.extraction.zoneCenter.y;
+        const margin = 48;
+        const onScreen =
+          zx >= view.x - margin &&
+          zx <= view.x + view.width + margin &&
+          zy >= view.y - margin &&
+          zy <= view.y + view.height + margin;
+        if (!onScreen) {
+          const px = state.run.player.position.x;
+          const py = state.run.player.position.y;
+          const dx = zx - px;
+          const dy = zy - py;
+          const len = Math.hypot(dx, dy) || 1;
+          const maxR = Math.min(view.width, view.height) * 0.36;
+          const ax = px + (dx / len) * maxR;
+          const ay = py + (dy / len) * maxR;
+          const angle = Math.atan2(dy, dx);
+          const tipX = ax + Math.cos(angle) * 20;
+          const tipY = ay + Math.sin(angle) * 20;
+          const wingA = 12;
+          extractionArrow.fillStyle(0xffe8a8, 0.95);
+          extractionArrow.fillTriangle(
+            tipX,
+            tipY,
+            ax + Math.cos(angle + 2.4) * wingA,
+            ay + Math.sin(angle + 2.4) * wingA,
+            ax + Math.cos(angle - 2.4) * wingA,
+            ay + Math.sin(angle - 2.4) * wingA
+          );
+          extractionArrow.lineStyle(2, 0xffffff, 0.65);
+          const b1x = ax + Math.cos(angle + 2.4) * wingA;
+          const b1y = ay + Math.sin(angle + 2.4) * wingA;
+          const b2x = ax + Math.cos(angle - 2.4) * wingA;
+          const b2y = ay + Math.sin(angle - 2.4) * wingA;
+          extractionArrow.lineBetween(tipX, tipY, b1x, b1y);
+          extractionArrow.lineBetween(tipX, tipY, b2x, b2y);
+          extractionArrow.lineBetween(b1x, b1y, b2x, b2y);
+        }
+      }
+    }
 
     const bossRewardChest = this.registryView.bossRewardChest!;
     bossRewardChest.setVisible(state.run.bossRewardChest.active);
@@ -264,6 +339,12 @@ export class GameScene extends Phaser.Scene {
         create: () =>
           this.add.circle(hazard.position.x, hazard.position.y, hazard.radius, 0xff728f, 0.12).setStrokeStyle(2, 0xff728f, 0.35),
         update: (view) => {
+          const isBeam = hazard.shape === "beam-v" || hazard.shape === "beam-h";
+          if (isBeam) {
+            view.setVisible(false);
+            return;
+          }
+          view.setVisible(true);
           view.setPosition(hazard.position.x, hazard.position.y);
           view.setRadius(hazard.radius);
           const telegraphRatio = hazard.telegraphTime > 0 ? hazard.telegraphTime / 1.45 : 0;
@@ -283,7 +364,16 @@ export class GameScene extends Phaser.Scene {
           const visibility = getVisionVisibility(enemy.position.x, enemy.position.y, state);
           view.setPosition(enemy.position.x, enemy.position.y);
           view.setTint(getEnemyTint(enemy.color, enemy.hp / enemy.maxHp));
-          view.setScale(enemy.radius / (enemy.type === "boss" ? 18 : enemy.type === "brute" ? 18 : 12));
+          view.setScale(
+            enemy.radius /
+              (enemy.type === "boss"
+                ? enemy.bossPattern === "laser-prime"
+                  ? 14
+                  : 18
+                : enemy.type === "brute"
+                  ? 18
+                  : 12)
+          );
           view.setVisible(visibility > 0.02);
           view.setAlpha(visibility);
         }
@@ -549,7 +639,7 @@ export class GameScene extends Phaser.Scene {
       .setDepth(10.2)
       .setAlpha(0);
     const subtitle = this.add
-      .text(centerX, centerY + 32, "首领坠毁 · 高阶奖励已析出", {
+      .text(centerX, centerY + 32, "复制体坠毁 · 高阶奖励已析出", {
         fontFamily: "Trebuchet MS, Segoe UI, sans-serif",
         fontSize: "18px",
         fontStyle: "700",
@@ -737,9 +827,11 @@ export class GameScene extends Phaser.Scene {
     }
 
     const bossActive = state.run.enemies.some((enemy) => enemy.type === "boss");
+    const primeBoss = state.run.enemies.some((enemy) => enemy.type === "boss" && enemy.bossPattern === "laser-prime");
     const alertStrength = bossActive ? 0.35 + Math.sin(this.time.now / 120) * 0.12 : 0;
     const warningStrength = state.run.bossAlertTimer > 0 ? 0.5 + Math.sin(this.time.now / 70) * 0.2 : 0;
     const alpha = Math.max(0, Math.max(alertStrength, warningStrength));
+    const borderColor = primeBoss ? 0x42e8ff : 0xff2f45;
 
     frame.clear();
     if (alpha <= 0.02) {
@@ -748,9 +840,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     frame.setVisible(true);
-    frame.lineStyle(10, 0xff2f45, alpha);
+    frame.lineStyle(10, borderColor, alpha);
     frame.strokeRect(5, 5, this.scale.width - 10, this.scale.height - 10);
-    frame.lineStyle(22, 0xff2f45, alpha * 0.2);
+    frame.lineStyle(22, borderColor, alpha * 0.2);
     frame.strokeRect(11, 11, this.scale.width - 22, this.scale.height - 22);
   }
 
@@ -761,12 +853,53 @@ export class GameScene extends Phaser.Scene {
     }
 
     graphics.clear();
-    if (state.run.status !== "running" && state.run.status !== "run-over") {
+    if (
+      state.run.status !== "running" &&
+      state.run.status !== "run-over" &&
+      state.run.status !== "story-clear-pending"
+    ) {
       return;
     }
 
     for (const hazard of state.run.hazards) {
-      if (hazard.source !== "boss" || hazard.telegraphTime <= 0) {
+      if (hazard.source !== "boss") {
+        continue;
+      }
+
+      const isBeam = hazard.shape === "beam-v" || hazard.shape === "beam-h";
+      if (isBeam) {
+        const ht = hazard.beamHalfThickness ?? 40;
+        const hl = hazard.beamHalfLength ?? 400;
+        const cx = hazard.position.x;
+        const cy = hazard.position.y;
+        const telegraphMax = 1.55;
+        const lineColor = 0x42e8ff;
+        const fillColor = 0x5cf8ff;
+        const wFull = hazard.shape === "beam-v" ? ht * 2 : hl * 2;
+        const hFull = hazard.shape === "beam-v" ? hl * 2 : ht * 2;
+
+        if (hazard.telegraphTime > 0) {
+          const ratio = Phaser.Math.Clamp(hazard.telegraphTime / telegraphMax, 0, 1);
+          const pulse = 1 + Math.sin(this.time.now / 70) * 0.04;
+          const shrink = 0.32 + (1 - ratio) * 0.68;
+          const w = wFull * shrink * pulse;
+          const h = hFull * shrink * pulse;
+          graphics.lineStyle(3, lineColor, 0.88);
+          graphics.strokeRect(cx - w / 2, cy - h / 2, w, h);
+          graphics.lineStyle(2, 0xffffff, 0.28 + (1 - ratio) * 0.22);
+          graphics.strokeRect(cx - wFull / 2, cy - hFull / 2, wFull, hFull);
+          graphics.fillStyle(fillColor, 0.07 + (1 - ratio) * 0.09);
+          graphics.fillRect(cx - wFull / 2, cy - hFull / 2, wFull, hFull);
+        } else if (hazard.active) {
+          graphics.fillStyle(lineColor, 0.12 + Math.sin(this.time.now / 90) * 0.05);
+          graphics.fillRect(cx - wFull / 2, cy - hFull / 2, wFull, hFull);
+          graphics.lineStyle(2, 0xffffff, 0.38);
+          graphics.strokeRect(cx - wFull / 2, cy - hFull / 2, wFull, hFull);
+        }
+        continue;
+      }
+
+      if (hazard.telegraphTime <= 0) {
         continue;
       }
 
@@ -833,7 +966,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     graphics.clear();
-    if (state.run.status !== "running") {
+    if (state.run.status !== "running" && state.run.status !== "story-clear-pending") {
       return;
     }
 
@@ -875,7 +1008,12 @@ export class GameScene extends Phaser.Scene {
 
     for (const enemy of offscreenEnemies) {
       const size = enemy.type === "boss" ? 13 : 9;
-      const color = enemy.type === "boss" ? 0xff4a63 : getEnemyTint(enemy.color, enemy.hp / enemy.maxHp);
+      const color =
+        enemy.type === "boss"
+          ? enemy.bossPattern === "laser-prime"
+            ? 0x5ce8ff
+            : 0xff4a63
+          : getEnemyTint(enemy.color, enemy.hp / enemy.maxHp);
       const alpha = enemy.type === "boss" ? 0.96 : 0.72;
       drawScreenEdgeArrow(enemy.position.x, enemy.position.y, size, color, alpha, 0.45);
     }

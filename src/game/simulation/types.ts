@@ -55,7 +55,9 @@ export type PlayerState = {
   barrierOrbitPhase: number;
 };
 
-export type BossPattern = "artillery" | "charger";
+export type BossPattern = "artillery" | "charger" | "laser-prime";
+
+export type HazardShape = "circle" | "beam-v" | "beam-h";
 
 export type EnemyState = {
   id: string;
@@ -74,6 +76,8 @@ export type EnemyState = {
   chargeDirection: Vec2;
   touchCooldown: number;
   color: number;
+  /** 终幕复写体（laser-prime）：用你的航迹合成的镜像，交替纵/横激光栅格 */
+  bossLaserPhase?: number;
 };
 
 export type ProjectileState = {
@@ -110,12 +114,16 @@ export type ShardState = {
 export type HazardState = {
   id: string;
   position: Vec2;
+  /** 圆形区域半径；束状 hazard 仍保留作兼容与粗略范围 */
   radius: number;
   damagePerSecond: number;
   active: boolean;
   telegraphTime: number;
   duration: number;
   source: "storm" | "boss";
+  shape?: HazardShape;
+  beamHalfThickness?: number;
+  beamHalfLength?: number;
 };
 
 export type HitEffectState = {
@@ -186,8 +194,13 @@ export type RunObjectiveState = {
   completionFlash: number;
 };
 
+/** 故事模式：完成第 N 阶段主线目标后出现抉择（与引擎内判定一致） */
+export const STORY_FINAL_STAGE = 12;
+
+export type RunMode = "story" | "infinite";
+
 export type RunSummary = {
-  result: "dead" | "extracted";
+  result: "dead" | "extracted" | "cleared";
   duration: number;
   level: number;
   weaponId: WeaponId;
@@ -267,7 +280,7 @@ export type MetaProgressState = {
 };
 
 export type RunState = {
-  status: "menu" | "running" | "paused" | "level-up" | "run-over" | "meta";
+  status: "menu" | "running" | "paused" | "level-up" | "run-over" | "meta" | "story-clear-pending";
   time: number;
   spawnAccumulator: number;
   runOverDelay: number;
@@ -304,6 +317,12 @@ export type RunState = {
   tutorialHint: string;
   screenFlash: number;
   runSummary: RunSummary | null;
+  /** 开局选择的模式 */
+  runMode: RunMode;
+  /** 故事模式：主线已完成后选择「继续作战」则为 true，之后不再弹出抉择 */
+  storyArcComplete: boolean;
+  /** 战役叙事：存在时冻结战斗，直至玩家关闭（仅 story） */
+  stageLore: null | { stage: number };
 };
 
 export type SimulationState = {

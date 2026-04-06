@@ -340,7 +340,7 @@ export const upgradeDefinitions: Record<UpgradeId, UpgradeDefinition> = {
   "zero-point-lattice": {
     id: "zero-point-lattice",
     title: "零点晶格",
-    description: "将弹体压缩为极限杀伤核心，贯穿、伤害、体积与锁定同时拉高，适合把首领当成固定靶击穿。",
+    description: "将弹体压缩为极限杀伤核心，贯穿、伤害、体积与锁定同时拉高，适合把复制体当成固定靶击穿。",
     category: "weapon",
     rarity: "legendary",
     archetype: "传说重炮",
@@ -496,7 +496,7 @@ export const upgradeTreeMeta: Record<UpgradeId, UpgradeTreeMeta> = {
   "supernova-heart": { branch: "barrage", tier: 3, parents: ["halo-shards", "sidewinder-rack"], codexSummary: "主弹、爆裂和击杀扩散一起失控，属于整局最爽的清场传说之一。" },
   "seeker-lens": { branch: "precision", tier: 2, parents: ["rapid-cycle"], codexSummary: "为弹体加入追踪修正，提升边缘命中率。" },
   "giant-core": { branch: "precision", tier: 2, parents: ["overclock-rounds"], codexSummary: "弹体更大更重，强化重炮压制感。" },
-  "zero-point-lattice": { branch: "precision", tier: 3, parents: ["giant-core", "pressure-core"], codexSummary: "把重炮路线推到传说级，直接提高击穿首领和精英的能力。" },
+  "zero-point-lattice": { branch: "precision", tier: 3, parents: ["giant-core", "pressure-core"], codexSummary: "把重炮路线推到传说级，直接提高击穿复制体与精英的能力。" },
   "blood-siphon": { branch: "survival", tier: 2, parents: ["rapid-cycle"], codexSummary: "把输出转为续航；大额回复时有绿色闪光提示。" },
   "aegis-surge": { branch: "survival", tier: 3, parents: ["auto-forge", "lattice-armor"], codexSummary: "同步强化护盾、机体和减伤，让站场上限明显抬高。" },
   "phoenix-protocol": { branch: "survival", tier: 3, parents: ["blood-siphon", "aegis-surge"], codexSummary: "提供额外抢修机会与超额生存面板，是最稳的传说续命卡。" },

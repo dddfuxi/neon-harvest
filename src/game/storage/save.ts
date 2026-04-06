@@ -17,8 +17,10 @@ function migrateLastRunSummary(
     return null;
   }
 
+  const result = summary.result ?? "dead";
   return {
     ...summary,
+    result,
     weaponId: summary.weaponId ?? "pulse-blaster",
     weaponLevel: summary.weaponLevel ?? 1,
     objectivesCompleted: summary.objectivesCompleted ?? 0,
@@ -26,7 +28,13 @@ function migrateLastRunSummary(
     buildRecap: summary.buildRecap ?? "本轮记录来自旧版本存档。",
     keyUpgrades: summary.keyUpgrades ?? [],
     upgradeSequence: summary.upgradeSequence ?? [],
-    deathReason: summary.deathReason ?? (summary.result === "extracted" ? "成功撤离，结算完成" : "旧版本未记录失败原因")
+    deathReason:
+      summary.deathReason ??
+      (result === "extracted"
+        ? "成功撤离，结算完成"
+        : result === "cleared"
+          ? "战役目标完成，已结算战利品"
+          : "旧版本未记录失败原因")
   };
 }
 

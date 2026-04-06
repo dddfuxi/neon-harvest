@@ -7,14 +7,14 @@ type ScoreEntry = {
   playerName: string;
   weaponId: string;
   score: number;
-  result: "dead" | "extracted";
+  result: "dead" | "extracted" | "cleared";
   duration: number;
   level: number;
   enemiesDestroyed: number;
 };
 
 type ScoreSummary = {
-  result: "dead" | "extracted";
+  result: "dead" | "extracted" | "cleared";
   duration: number;
   level: number;
   weaponId: string;
@@ -128,7 +128,7 @@ function normalizeSummary(input: unknown): ScoreSummary | null {
 
   const summary = input as Record<string, unknown>;
   if (
-    (summary.result !== "dead" && summary.result !== "extracted") ||
+    (summary.result !== "dead" && summary.result !== "extracted" && summary.result !== "cleared") ||
     typeof summary.duration !== "number" ||
     typeof summary.level !== "number" ||
     typeof summary.weaponId !== "string" ||

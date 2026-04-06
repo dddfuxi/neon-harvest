@@ -107,6 +107,86 @@ body {
   pointer-events: none;
 }
 
+.stage-lore-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  padding: min(24px, 4vw);
+  background: rgba(4, 8, 18, 0.82);
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+}
+
+.stage-lore-panel {
+  max-width: 520px;
+  width: 100%;
+  padding: 22px 24px;
+  border-radius: 16px;
+  border: 1px solid rgba(108, 243, 255, 0.28);
+  box-shadow: 0 28px 56px rgba(0, 0, 0, 0.55);
+  background: linear-gradient(165deg, rgba(14, 22, 38, 0.98), rgba(6, 10, 20, 0.96));
+}
+
+.stage-lore-title {
+  margin: 8px 0 12px;
+  font-size: 20px;
+  letter-spacing: 0.06em;
+  line-height: 1.35;
+}
+
+.stage-lore-body {
+  min-height: 6.5em;
+  line-height: 1.68;
+  font-size: 14px;
+  color: rgba(228, 238, 250, 0.95);
+  margin: 0 0 14px;
+  white-space: pre-wrap;
+}
+
+.stage-lore-beats {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.stage-lore-beat {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.stage-lore-beat--goal {
+  color: #ffe08a;
+  text-shadow: 0 0 12px rgba(255, 192, 72, 0.25);
+  font-weight: 600;
+}
+
+.stage-lore-beat--amber {
+  color: #ffd89c;
+  opacity: 0.96;
+}
+
+.stage-lore-beat--danger {
+  color: #ff8b8b;
+  font-weight: 600;
+  text-shadow: 0 0 14px rgba(255, 80, 80, 0.22);
+}
+
+.stage-lore-hint {
+  margin-bottom: 14px;
+  font-size: 12px;
+}
+
+.stage-lore-continue {
+  width: 100%;
+}
+
 .modal-layer {
   position: absolute;
   inset: 0;
@@ -318,6 +398,80 @@ body {
   color: rgba(220, 235, 248, 0.92);
 }
 
+.extraction-hud-strip {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 200, 120, 0.38);
+  background: linear-gradient(135deg, rgba(255, 186, 96, 0.14), rgba(255, 96, 48, 0.06));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 0 18px rgba(255, 200, 100, 0.12);
+}
+
+.extraction-hud-strip .label {
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 220, 160, 0.95);
+}
+
+.extraction-hud-strip .body-copy {
+  flex: 1 1 200px;
+  min-width: 0;
+  color: rgba(255, 245, 220, 0.95);
+}
+
+.extraction-hud-strip strong {
+  color: #ffe8a8;
+}
+
+.mobile-hud .extraction-hud-strip {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+  font-size: 10px;
+  padding: 8px 10px;
+}
+
+.run-mode-picker {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(108, 243, 255, 0.18);
+  background: rgba(8, 18, 32, 0.45);
+}
+
+.run-mode-picker > .label {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.run-mode-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.run-mode-buttons .button.primary {
+  box-shadow: 0 0 16px rgba(108, 243, 255, 0.25);
+}
+
+.run-mode-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.story-clear-modal .screen-subtitle {
+  max-width: 44em;
+}
+
 .mobile-hud .economy-hud-strip {
   grid-column: 1 / -1;
   margin-top: 0;
@@ -416,6 +570,18 @@ body {
   color: var(--text);
   cursor: pointer;
   overflow: hidden;
+}
+
+.legendary-core-reveal:disabled,
+.legendary-core-reveal.legendary-core-reveal--locked {
+  cursor: default;
+  opacity: 0.88;
+  filter: saturate(0.92);
+}
+
+.legendary-core-reveal:disabled .legendary-core-shell,
+.legendary-core-reveal.legendary-core-reveal--locked .legendary-core-shell {
+  pointer-events: none;
 }
 
 .legendary-core-reveal strong {
@@ -837,9 +1003,26 @@ body {
   filter: saturate(0.3);
 }
 
-.codex-card.discovered {
-  border-color: rgba(108, 243, 255, 0.2);
-  box-shadow: inset 0 0 0 1px rgba(108, 243, 255, 0.05);
+/* 技能图鉴：品质色外框（与局内升级卡一致） */
+.codex-card.rarity-common {
+  border-color: rgba(108, 243, 255, 0.38);
+  box-shadow: inset 0 0 0 1px rgba(108, 243, 255, 0.1);
+}
+
+.codex-card.rarity-rare {
+  border-color: rgba(87, 199, 255, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(87, 199, 255, 0.12);
+}
+
+.codex-card.rarity-epic {
+  border-color: rgba(255, 139, 216, 0.52);
+  box-shadow: inset 0 0 0 1px rgba(255, 139, 216, 0.14);
+}
+
+.codex-card.rarity-legendary {
+  border-color: rgba(255, 196, 107, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(255, 196, 107, 0.18), 0 0 22px rgba(255, 196, 107, 0.12);
+  background: linear-gradient(180deg, rgba(32, 22, 12, 0.9), rgba(10, 16, 28, 0.92));
 }
 
 .skill-feedback {

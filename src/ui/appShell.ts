@@ -14,7 +14,17 @@ import { weaponDefinitions, type WeaponId } from "../game/content/weapons";
 import { type UiCommand } from "../game/simulation/engine";
 import { metaUpgrades, preRunSupplyDefinitions } from "../game/simulation/meta";
 import { clearPersistedState, loadState, persistState } from "../game/storage/save";
-import type { LeaderboardEntry, PreRunSupplyId, SimulationState, SkillFeedbackEntry, SkillVoteKind } from "../game/simulation/types";
+import {
+  STORY_FINAL_STAGE,
+  type LeaderboardEntry,
+  type PreRunSupplyId,
+  type RunMode,
+  type RunSummary,
+  type SimulationState,
+  type SkillFeedbackEntry,
+  type SkillVoteKind
+} from "../game/simulation/types";
+import { getStageLore, getStageLoreHudBeats } from "../game/content/stageLore";
 import { createGame } from "../phaser/createGame";
 
 type OnlineRunSession = {
@@ -39,6 +49,8 @@ const rarityMap = {
 export function createAppShell(root: HTMLElement): void {
   let state = loadState();
   let selectedWeapon: WeaponId = state.meta.unlockedWeapons[0] ?? "pulse-blaster";
+  const storedRunMode = window.localStorage.getItem("neon-harvest-run-mode");
+  let selectedRunMode: RunMode = storedRunMode === "story" || storedRunMode === "infinite" ? storedRunMode : "story";
   let onlineLeaderboard: LeaderboardEntry[] = [];
   let leaderboardNotice = "";
   let isUploadingScore = false;
@@ -47,8 +59,17 @@ export function createAppShell(root: HTMLElement): void {
   let legendaryRewardRevealKey: string | null = null;
   let legendaryRewardOpened = false;
   let legendaryRewardTimer: number | null = null;
+  /** 传说核心界面：忽略「展开」点击，吸收从战斗带入的误触 */
+  let legendaryRevealClickUnlockAt = 0;
+  /** 三选一卡片：入场动画结束前不可确认 */
+  let legendaryChoicesClickUnlockAt = 0;
+  let legendaryModalRefreshTimer: number | null = null;
   const pendingSkillFeedback = new Set<UpgradeId>();
   const commandQueue: UiCommand[] = [];
+  let loreTwStage = 0;
+  let loreTwPos = 0;
+  let loreTwFull = "";
+  let loreTwTimer: ReturnType<typeof setInterval> | null = null;
 
   root.innerHTML = `
     <div class="shell">
@@ -77,6 +98,40 @@ export function createAppShell(root: HTMLElement): void {
 
   setupTouchControls(touchLayer);
 
+  const LEGENDARY_REVEAL_CLICK_GUARD_MS = 520;
+  const LEGENDARY_CORE_AUTO_REVEAL_MS = 1100;
+  const LEGENDARY_CARD_ENTRY_MS = 520;
+  const LEGENDARY_CARD_STAGGER_MS = 90;
+  const LEGENDARY_CHOICES_TAIL_BUFFER_MS = 320;
+
+  const scheduleLegendaryChoicesUnlock = (offerCount: number) => {
+    const stagger = Math.max(0, offerCount - 1) * LEGENDARY_CARD_STAGGER_MS;
+    legendaryChoicesClickUnlockAt = Date.now() + stagger + LEGENDARY_CARD_ENTRY_MS + LEGENDARY_CHOICES_TAIL_BUFFER_MS;
+    scheduleLegendaryModalRefresh();
+  };
+
+  const scheduleLegendaryModalRefresh = () => {
+    if (legendaryModalRefreshTimer !== null) {
+      window.clearTimeout(legendaryModalRefreshTimer);
+      legendaryModalRefreshTimer = null;
+    }
+    const now = Date.now();
+    const nextUnlock = Math.min(
+      legendaryRevealClickUnlockAt > now ? legendaryRevealClickUnlockAt : Number.POSITIVE_INFINITY,
+      legendaryChoicesClickUnlockAt > now ? legendaryChoicesClickUnlockAt : Number.POSITIVE_INFINITY
+    );
+    if (!Number.isFinite(nextUnlock) || nextUnlock === Number.POSITIVE_INFINITY) {
+      return;
+    }
+    legendaryModalRefreshTimer = window.setTimeout(() => {
+      legendaryModalRefreshTimer = null;
+      if (state.run.status === "level-up" && state.run.upgradeOfferSource === "boss-legendary") {
+        rerenderModal();
+        scheduleLegendaryModalRefresh();
+      }
+    }, Math.max(0, nextUnlock - now) + 20);
+  };
+
   const rerenderModal = () => {
     const previousMenuShell = modalLayer.querySelector<HTMLElement>(".menu-shell");
     const previousScrollTop = previousMenuShell?.scrollTop ?? 0;
@@ -84,12 +139,15 @@ export function createAppShell(root: HTMLElement): void {
       modalLayer,
       state,
       selectedWeapon,
+      selectedRunMode,
       onlineLeaderboard,
       leaderboardNotice,
       isUploadingScore,
       leaderboardName,
       pendingSkillFeedback,
-      legendaryRewardOpened
+      legendaryRewardOpened,
+      legendaryRevealClickUnlockAt,
+      legendaryChoicesClickUnlockAt
     );
     const nextMenuShell = modalLayer.querySelector<HTMLElement>(".menu-shell");
     if (nextMenuShell) {
@@ -106,9 +164,15 @@ export function createAppShell(root: HTMLElement): void {
     if (!nextKey) {
       legendaryRewardRevealKey = null;
       legendaryRewardOpened = false;
+      legendaryRevealClickUnlockAt = 0;
+      legendaryChoicesClickUnlockAt = 0;
       if (legendaryRewardTimer !== null) {
         window.clearTimeout(legendaryRewardTimer);
         legendaryRewardTimer = null;
+      }
+      if (legendaryModalRefreshTimer !== null) {
+        window.clearTimeout(legendaryModalRefreshTimer);
+        legendaryModalRefreshTimer = null;
       }
       return;
     }
@@ -119,6 +183,8 @@ export function createAppShell(root: HTMLElement): void {
 
     legendaryRewardRevealKey = nextKey;
     legendaryRewardOpened = false;
+    legendaryRevealClickUnlockAt = Date.now() + LEGENDARY_REVEAL_CLICK_GUARD_MS;
+    legendaryChoicesClickUnlockAt = 0;
     if (legendaryRewardTimer !== null) {
       window.clearTimeout(legendaryRewardTimer);
     }
@@ -127,8 +193,54 @@ export function createAppShell(root: HTMLElement): void {
         return;
       }
       legendaryRewardOpened = true;
+      scheduleLegendaryChoicesUnlock(state.run.offeredUpgrades.length);
       rerenderModal();
-    }, 400);
+    }, LEGENDARY_CORE_AUTO_REVEAL_MS);
+    scheduleLegendaryModalRefresh();
+  };
+
+  const syncStageLoreTypewriter = () => {
+    if (!state.run.stageLore || state.run.status !== "running") {
+      if (loreTwTimer !== null) {
+        clearInterval(loreTwTimer);
+        loreTwTimer = null;
+      }
+      loreTwStage = 0;
+      loreTwPos = 0;
+      loreTwFull = "";
+      return;
+    }
+    const st = state.run.stageLore.stage;
+    const full = getStageLore(st).body;
+    if (st !== loreTwStage) {
+      if (loreTwTimer !== null) {
+        clearInterval(loreTwTimer);
+        loreTwTimer = null;
+      }
+      loreTwStage = st;
+      loreTwPos = 0;
+      loreTwFull = full;
+      const tick = () => {
+        loreTwPos += 1;
+        const node = hudLayer.querySelector<HTMLElement>("#stage-lore-type-text");
+        if (node) {
+          node.textContent = loreTwFull.slice(0, loreTwPos);
+        }
+        if (loreTwPos >= loreTwFull.length) {
+          if (loreTwTimer !== null) {
+            clearInterval(loreTwTimer);
+            loreTwTimer = null;
+          }
+        }
+      };
+      loreTwTimer = window.setInterval(tick, 28);
+      tick();
+    } else {
+      const node = hudLayer.querySelector<HTMLElement>("#stage-lore-type-text");
+      if (node && loreTwFull.length > 0) {
+        node.textContent = loreTwFull.slice(0, loreTwPos);
+      }
+    }
   };
 
   const renderAll = (next: SimulationState) => {
@@ -137,10 +249,11 @@ export function createAppShell(root: HTMLElement): void {
     const touchUiActive = shouldUseTouchUi();
     syncLegendaryRewardReveal();
     renderHud(hudLayer, state);
+    syncStageLoreTypewriter();
     renderTouchFeedback(touchLayer, state);
     rerenderModal();
     modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
-    touchLayer.classList.toggle("active", state.run.status === "running" && touchUiActive);
+    touchLayer.classList.toggle("active", state.run.status === "running" && touchUiActive && !state.run.stageLore);
     updateOrientationOverlay(orientationLayer, state.run.status === "running");
   };
 
@@ -171,6 +284,26 @@ export function createAppShell(root: HTMLElement): void {
     `;
   }
 
+  hudLayer.addEventListener("click", (event) => {
+    const btn = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-hud-command]");
+    if (!btn || btn.dataset.hudCommand !== "dismiss-stage-lore") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    commandQueue.push({ type: "dismiss-stage-lore" });
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (state.run.status !== "running" || !state.run.stageLore) {
+      return;
+    }
+    if (event.code === "Escape" || event.code === "Space") {
+      event.preventDefault();
+      commandQueue.push({ type: "dismiss-stage-lore" });
+    }
+  });
+
   modalLayer.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
     if (!target) {
@@ -182,7 +315,11 @@ export function createAppShell(root: HTMLElement): void {
       const command = commandButton.dataset.command!;
       if (command === "start-run") {
         void beginOnlineRunSession(selectedWeapon);
-        commandQueue.push({ type: "start-run", weaponId: selectedWeapon });
+        commandQueue.push({ type: "start-run", weaponId: selectedWeapon, runMode: selectedRunMode });
+      } else if (command === "story-post-continue") {
+        commandQueue.push({ type: "choose-story-post-clear", choice: "continue" });
+      } else if (command === "story-post-settle") {
+        commandQueue.push({ type: "choose-story-post-clear", choice: "settle" });
       } else if (command === "enter-meta") {
         commandQueue.push({ type: "enter-meta" });
       } else if (command === "exit-meta") {
@@ -194,11 +331,15 @@ export function createAppShell(root: HTMLElement): void {
       } else if (command === "upload-score") {
         void uploadLatestScore();
       } else if (command === "reveal-legendary-reward") {
+        if (Date.now() < legendaryRevealClickUnlockAt) {
+          return;
+        }
         legendaryRewardOpened = true;
         if (legendaryRewardTimer !== null) {
           window.clearTimeout(legendaryRewardTimer);
           legendaryRewardTimer = null;
         }
+        scheduleLegendaryChoicesUnlock(state.run.offeredUpgrades.length);
         rerenderModal();
       } else if (command === "reset-save") {
         const confirmed = window.confirm("这会清除本地进度、机库改装、图鉴和排行榜。确定要重新开始吗？");
@@ -210,9 +351,15 @@ export function createAppShell(root: HTMLElement): void {
         selectedWeapon = state.meta.unlockedWeapons[0] ?? "pulse-blaster";
         legendaryRewardRevealKey = null;
         legendaryRewardOpened = false;
+        legendaryRevealClickUnlockAt = 0;
+        legendaryChoicesClickUnlockAt = 0;
         if (legendaryRewardTimer !== null) {
           window.clearTimeout(legendaryRewardTimer);
           legendaryRewardTimer = null;
+        }
+        if (legendaryModalRefreshTimer !== null) {
+          window.clearTimeout(legendaryModalRefreshTimer);
+          legendaryModalRefreshTimer = null;
         }
         renderAll(state);
       }
@@ -221,6 +368,14 @@ export function createAppShell(root: HTMLElement): void {
 
     const skillVoteButton = target.closest<HTMLElement>("[data-skill-vote]");
     if (skillVoteButton) {
+      if (
+        state.run.status === "level-up" &&
+        state.run.upgradeOfferSource === "boss-legendary" &&
+        legendaryRewardOpened &&
+        Date.now() < legendaryChoicesClickUnlockAt
+      ) {
+        return;
+      }
       const skillId = skillVoteButton.dataset.skillId as UpgradeId | undefined;
       const vote = skillVoteButton.dataset.skillVote as SkillVoteKind | undefined;
       if (skillId && vote) {
@@ -231,6 +386,13 @@ export function createAppShell(root: HTMLElement): void {
 
     const upgradeButton = target.closest<HTMLElement>("[data-upgrade]");
     if (upgradeButton) {
+      if (
+        state.run.status === "level-up" &&
+        state.run.upgradeOfferSource === "boss-legendary" &&
+        Date.now() < legendaryChoicesClickUnlockAt
+      ) {
+        return;
+      }
       commandQueue.push({
         type: "choose-upgrade",
         upgradeId: upgradeButton.dataset.upgrade as keyof typeof upgradeDefinitions
@@ -257,6 +419,18 @@ export function createAppShell(root: HTMLElement): void {
     const supplyButton = target.closest<HTMLElement>("[data-supply]");
     if (supplyButton) {
       commandQueue.push({ type: "buy-supply", supplyId: supplyButton.dataset.supply as PreRunSupplyId });
+      return;
+    }
+
+    const runModeButton = target.closest<HTMLElement>("[data-run-mode]");
+    if (runModeButton) {
+      const mode = runModeButton.dataset.runMode as RunMode | undefined;
+      if (mode === "story" || mode === "infinite") {
+        selectedRunMode = mode;
+        window.localStorage.setItem("neon-harvest-run-mode", mode);
+        rerenderModal();
+        modalLayer.style.pointerEvents = state.run.status === "running" || isDeathTransitionActive(state) ? "none" : "auto";
+      }
       return;
     }
 
@@ -459,6 +633,37 @@ export function createAppShell(root: HTMLElement): void {
   }
 }
 
+function renderStageLoreOverlay(state: SimulationState): string {
+  if (!state.run.stageLore || state.run.status !== "running") {
+    return "";
+  }
+  const st = state.run.stageLore.stage;
+  const { title } = getStageLore(st);
+  const beats = getStageLoreHudBeats(st, state.run.objective, state.run.stageTheme);
+  const amberBlock = beats.amber
+    ? `<p class="stage-lore-beat stage-lore-beat--amber">${escapeHtml(beats.amber)}</p>`
+    : "";
+  const redBlock = beats.red
+    ? `<p class="stage-lore-beat stage-lore-beat--danger">${escapeHtml(beats.red)}</p>`
+    : "";
+  return `
+    <div class="stage-lore-overlay" role="dialog" aria-modal="true">
+      <div class="stage-lore-panel panel">
+        <p class="label">阶段 ${st} · 黑域记录</p>
+        <h3 class="stage-lore-title">${escapeHtml(title)}</h3>
+        <p class="stage-lore-body" id="stage-lore-type-text"></p>
+        <div class="stage-lore-beats" aria-label="本阶段目标与威胁提示">
+          <p class="stage-lore-beat stage-lore-beat--goal">${escapeHtml(beats.goal)}</p>
+          ${redBlock}
+          ${amberBlock}
+        </div>
+        <p class="stage-lore-hint body-copy">空格 / Esc 或点击继续 · 关闭后恢复战斗</p>
+        <button type="button" class="button primary stage-lore-continue" data-hud-command="dismiss-stage-lore">继续</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderEconomyHudStrip(state: SimulationState): string {
   const p = state.run.player;
   const tagged =
@@ -473,6 +678,16 @@ function renderEconomyHudStrip(state: SimulationState): string {
     parts.push("劫运已生效");
   }
   return `<div class="economy-hud-strip"><span class="label">资源倍率</span><div class="body-copy">${parts.join(" · ")}</div></div>`;
+}
+
+function renderExtractionHudStrip(state: SimulationState): string {
+  if (!state.run.extraction.unlocked) {
+    return "";
+  }
+  if (state.run.status !== "running" && state.run.status !== "story-clear-pending") {
+    return "";
+  }
+  return `<div class="extraction-hud-strip"><span class="label">撤离信标</span><div class="body-copy">已上线 — 前往地图高亮区，长按 <strong>E</strong> / 交互键撤离</div></div>`;
 }
 
 function renderHud(container: HTMLElement, state: SimulationState): void {
@@ -513,8 +728,10 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
           <div class="mobile-runtime-main">${runMinutes}:${runSeconds}</div>
           <div class="body-copy">${characterSkillDefinitions[state.run.player.characterSkillId].name}</div>
         </div>
+        ${renderExtractionHudStrip(state)}
         ${renderEconomyHudStrip(state)}
       </div>
+      ${renderStageLoreOverlay(state)}
     `;
     return;
   }
@@ -534,6 +751,7 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
       </div>
     </div>
     <div class="hud-bottom">
+      ${renderExtractionHudStrip(state)}
       <div class="panel status-strip">
         <span class="label">战局状态</span>
         <div><strong>${state.run.extraction.unlocked ? "撤离已开启" : "采集阶段进行中"}</strong></div>
@@ -549,6 +767,7 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
         <div class="body-copy">当前角色特性：${characterSkillDefinitions[state.run.player.characterSkillId].description}</div>
       </div>
     </div>
+    ${renderStageLoreOverlay(state)}
   `;
 }
 
@@ -569,12 +788,15 @@ function renderModal(
   container: HTMLElement,
   state: SimulationState,
   selectedWeapon: WeaponId,
+  selectedRunMode: RunMode,
   onlineLeaderboard: LeaderboardEntry[],
   leaderboardNotice: string,
   isUploadingScore: boolean,
   leaderboardName: string,
   pendingSkillFeedback: ReadonlySet<UpgradeId>,
-  legendaryRewardOpened: boolean
+  legendaryRewardOpened: boolean,
+  legendaryRevealClickUnlockAt: number,
+  legendaryChoicesClickUnlockAt: number
 ): void {
   const summary = state.meta.lastRunSummary ?? state.run.runSummary;
   const weapon = weaponDefinitions[selectedWeapon];
@@ -589,12 +811,20 @@ function renderModal(
       <div class="menu-shell panel">
         <div class="hero-layout">
           <section class="hero-copy">
-            <p class="eyebrow">Neon Harvest // Infinite Roguelite</p>
+            <p class="eyebrow">Neon Harvest // 黑域打捞 · Roguelite</p>
             <h1 class="hero-title">霓虹回收者</h1>
-            <p class="hero-text">在无边黑域中搜集能量、拼出弹幕流派、顶住不断升级的威胁。你不是在堆数值，而是在把武器一步步改造成真正有风格的杀伤系统。</p>
+            <p class="hero-text">在黑域里打捞霓虹碎片、拼出你的弹幕流派；威胁会随阶段与采样一起涨，杂兵只是系统烧掉的 token。你不是在堆面板，而是在把主武器拧成有签名感的杀伤回路——让人类这一侧的操作，还能压过技能模型拷出来的假货。</p>
             <div class="hero-actions">
               <button type="button" class="button primary launch-button" data-command="start-run">开始战局</button>
               <button type="button" class="button" data-command="enter-meta">进入机库</button>
+            </div>
+            <div class="run-mode-picker">
+              <span class="label">合约模式</span>
+              <div class="run-mode-buttons">
+                <button type="button" class="button ${selectedRunMode === "story" ? "primary" : ""}" data-run-mode="story">战役</button>
+                <button type="button" class="button ${selectedRunMode === "infinite" ? "primary" : ""}" data-run-mode="infinite">清剿</button>
+              </div>
+              <p class="body-copy run-mode-hint">战役：每阶段有黑域叙事，单阶段目标量高于清剿；途中会遭遇技能模型拷出来的<strong>同事复制体</strong>，进入第 ${STORY_FINAL_STAGE} 阶段时会面对<strong>终幕·你的复写</strong>。完成该阶段主线后可撤离结算或继续清剿。清剿：规则与撤离一致，不播放阶段叙事，节奏更偏纯清场。</p>
             </div>
             <div class="build-pill-row">
               <span class="build-pill">${weapon.subtitle}</span>
@@ -684,24 +914,28 @@ function renderModal(
       state.run.upgradeOfferSource === "boss-legendary"
         ? "传说核心析出"
         : state.run.upgradeOfferSource === "boss-epic"
-          ? "首领宝箱开启"
+          ? "副本宝箱开启"
           : "选择本轮强化";
     const offerSubtitle =
       state.run.upgradeOfferSource === "boss-legendary"
-        ? "这是三次首领击破后的传说奖励。三选一，拿到就是整局质变。"
+        ? "这是三次复制体讨伐后的传说奖励。三选一，拿到就是整局质变。"
         : state.run.upgradeOfferSource === "boss-epic"
-          ? "首领核心崩解后会掉出高阶奖励，本次至少会看到稀有和史诗。"
+          ? "复制体核心崩解后会掉出高阶奖励，本次至少会看到稀有和史诗。"
           : "先看流派定位，再决定是补短板，还是继续把强项推到极致。";
     const shouldShowLegendaryCore = isLegendaryReward && !legendaryRewardOpened;
+    const revealInputLocked = Boolean(shouldShowLegendaryCore && Date.now() < legendaryRevealClickUnlockAt);
+    const choicesInputLocked = Boolean(
+      isLegendaryReward && legendaryRewardOpened && Date.now() < legendaryChoicesClickUnlockAt
+    );
     container.innerHTML = `
       <div class="modal-card panel ${isLegendaryReward ? "legendary-reward-panel" : ""}">
-        <p class="label">${state.run.upgradeOfferSource === "level-up" ? "构筑升级" : "首领奖励"}</p>
+        <p class="label">${state.run.upgradeOfferSource === "level-up" ? "构筑升级" : "副本奖励"}</p>
         <h2 class="screen-title compact">${offerTitle}</h2>
         <p class="screen-subtitle">${offerSubtitle}</p>
         ${
           shouldShowLegendaryCore
             ? `
-              <button type="button" class="legendary-core-reveal" data-command="reveal-legendary-reward">
+              <button type="button" class="legendary-core-reveal ${revealInputLocked ? "legendary-core-reveal--locked" : ""}" data-command="reveal-legendary-reward" ${revealInputLocked ? "disabled" : ""}>
                 <div class="legendary-core-shell">
                   <div class="legendary-core-orbit orbit-a"></div>
                   <div class="legendary-core-orbit orbit-b"></div>
@@ -709,7 +943,7 @@ function renderModal(
                   <div class="legendary-core-glow"></div>
                 </div>
                 <strong>传说核心正在析出</strong>
-                <span>0.4 秒后自动展开，也可以立即点击开启</span>
+                <span>${revealInputLocked ? "正在屏蔽误触，稍后可点击展开…" : "约 1.1 秒后自动展开；亦可点击展开"}</span>
               </button>
             `
             : `
@@ -734,7 +968,7 @@ function renderModal(
                         ${renderSkillFeedbackControls(state, upgrade.id, pendingSkillFeedback.has(upgrade.id), "compact")}
                         <footer class="label">${upgrade.archetype}</footer>
                         <div class="button-row">
-                          <button type="button" class="button primary choice-confirm-button" data-upgrade="${upgradeId}">选择强化</button>
+                          <button type="button" class="button primary choice-confirm-button" data-upgrade="${upgradeId}" ${choicesInputLocked ? "disabled" : ""}>${choicesInputLocked ? "入场动画中…" : "选择强化"}</button>
                         </div>
                       </article>
                     `;
@@ -743,6 +977,21 @@ function renderModal(
               </div>
             `
         }
+      </div>
+    `;
+    return;
+  }
+
+  if (state.run.status === "story-clear-pending") {
+    container.innerHTML = `
+      <div class="modal-card panel story-clear-modal">
+        <p class="label">黑域节点</p>
+        <h2 class="screen-title compact">主线已完成</h2>
+        <p class="screen-subtitle">战役阶段目标已全部达成——这一轮<strong>人类席位</strong>暂时保住了。可撤离并结算战利品，或继续在本区清剿（威胁与采样会持续加码）。撤离信标已上线时，也可前往高亮区长按交互键撤离。</p>
+        <div class="button-row">
+          <button type="button" class="button primary" data-command="story-post-continue">继续作战</button>
+          <button type="button" class="button" data-command="story-post-settle">撤离结算</button>
+        </div>
       </div>
     `;
     return;
@@ -768,7 +1017,7 @@ function renderModal(
       <div class="modal-card panel">
         <p class="label">机库</p>
         <h2 class="screen-title compact">永久升级</h2>
-        <p class="screen-subtitle">局外强化负责开局质量，真正决定上限的，仍然是局内的路线选择和临场操作。</p>
+        <p class="screen-subtitle">机库里的改装是你的<strong>人类资产底牌</strong>，拉高开局质量；真正跟技能模型对线的，仍是局内构筑与临场操作。</p>
         <div class="summary-grid">
           <div class="panel"><span class="label">积分</span><div class="value">${state.meta.credits}</div></div>
           <div class="panel"><span class="label">已解锁武器</span><div class="value">${state.meta.unlockedWeapons.length}</div></div>
@@ -811,10 +1060,15 @@ function renderModal(
   }
 
   if (state.run.status === "run-over") {
+    const runResult = state.run.runSummary?.result;
+    const runOverLabel =
+      runResult === "extracted" ? "成功撤离" : runResult === "cleared" ? "战役通关" : "机体损毁";
+    const runOverTitle =
+      runResult === "extracted" ? "结算完成" : runResult === "cleared" ? "胜利结算" : "本轮失败";
     container.innerHTML = `
       <div class="modal-card panel">
-        <p class="label">${state.run.runSummary?.result === "extracted" ? "成功撤离" : "机体损毁"}</p>
-        <h2 class="screen-title compact">${state.run.runSummary?.result === "extracted" ? "结算完成" : "本轮失败"}</h2>
+        <p class="label">${runOverLabel}</p>
+        <h2 class="screen-title compact">${runOverTitle}</h2>
         <p class="screen-subtitle">${state.run.tutorialHint}</p>
         ${summary ? renderSummary(summary) : ""}
         <div class="panel leaderboard-section">
@@ -963,7 +1217,7 @@ function renderArchetypePreview(): string {
   const featured = [
     ["追踪散射流", "双牙并列 + 三联祷文 + 追踪透镜", "先铺覆盖，再让追踪修正边缘目标，打起来稳定而省操作。"],
     ["爆裂清场流", "幽灵弹壳 + 圣环裂片 + 高速循环", "单点击杀会迅速扩散成一整片爆裂区，清群效率极高。"],
-    ["重炮贯穿流", "巨构弹核 + 穿刺回响 + 压力核心", "低频高伤，适合远距离点掉精英和首领关键目标。"],
+    ["重炮贯穿流", "巨构弹核 + 穿刺回响 + 压力核心", "低频高伤，适合远距离点掉精英和复制体关键目标。"],
     ["深空侦测流", "勘测阵列 + 深空雷达 + 斥力尾翼", "先看到、先走位、先开火，用信息差换生存空间。"]
   ];
 
@@ -1191,9 +1445,10 @@ function renderSkillCodex(state: SimulationState, pendingSkillFeedback: Readonly
               const upgrade = upgradeDefinitions[upgradeId];
               const meta = upgradeTreeMeta[upgradeId];
               return `
-                <article class="meta-card codex-card ${unlocked ? "discovered" : "locked"}">
+                <article class="meta-card codex-card rarity-${upgrade.rarity} ${unlocked ? "discovered" : "locked"}">
                   <div class="choice-meta">
-                    <span class="rarity-pill">${upgradeBranchLabels[meta.branch]}</span>
+                    <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
+                    <span class="rarity-type">${upgradeBranchLabels[meta.branch]}</span>
                     <span class="rarity-type">T${meta.tier}</span>
                   </div>
                   <h3>${unlocked ? upgrade.title : "未发现技能"}</h3>
@@ -1232,7 +1487,7 @@ function renderLeaderboard(entries: LeaderboardEntry[]): string {
               <div class="leaderboard-main">
                 <strong>${escapeHtml(entry.playerName || "Anonymous")}</strong>
                 <span>${entry.score} 分</span>
-                <span>${weapon.name} · ${entry.result === "extracted" ? "成功撤离" : "战败"}</span>
+                <span>${weapon.name} · ${translateResult(entry.result)}</span>
               </div>
               <div class="leaderboard-meta">
                 <span>Lv.${entry.level}</span>
@@ -1260,8 +1515,14 @@ function isDeathTransitionActive(state: SimulationState): boolean {
   return state.run.status === "run-over" && state.run.runSummary?.result === "dead" && state.run.runOverDelay > 0;
 }
 
-function translateResult(result: "dead" | "extracted"): string {
-  return result === "extracted" ? "成功撤离" : "战败";
+function translateResult(result: RunSummary["result"]): string {
+  if (result === "extracted") {
+    return "成功撤离";
+  }
+  if (result === "cleared") {
+    return "战役通关";
+  }
+  return "战败";
 }
 
 function translateMetaName(id: string, fallback: string): string {

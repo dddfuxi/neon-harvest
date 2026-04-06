@@ -13,26 +13,30 @@ import type { InputSnapshot } from "../input/actions";
 import { add, clamp, distance, distancePointToSegment, fromAngle, normalize, scale, subtract } from "./math";
 import { buyMetaUpgrade, buyPreRunSupply, buyWeaponMod } from "./meta";
 import { randomChoice, randomFloat } from "./random";
-import { createRunState } from "./state";
-import type {
-  BossPattern,
-  EnemyState,
-  HazardState,
-  HitEffectState,
-  ObstacleState,
-  ProjectileState,
-  RunAnnouncement,
-  RunObjectiveState,
-  RunSummary,
-  RunTheme,
-  ShardState,
-  SimulationState,
-  UpgradeOfferSource,
-  Vec2
+import { createRunState, getObjectiveTargetForStage } from "./state";
+import {
+  STORY_FINAL_STAGE,
+  type BossPattern,
+  type EnemyState,
+  type HazardState,
+  type HitEffectState,
+  type ObstacleState,
+  type ProjectileState,
+  type RunAnnouncement,
+  type RunObjectiveState,
+  type RunSummary,
+  type RunTheme,
+  type ShardState,
+  type SimulationState,
+  type UpgradeOfferSource,
+  type Vec2,
+  type RunMode
 } from "./types";
 
 export type UiCommand =
-  | { type: "start-run"; weaponId?: WeaponId }
+  | { type: "start-run"; weaponId?: WeaponId; runMode?: RunMode }
+  | { type: "choose-story-post-clear"; choice: "continue" | "settle" }
+  | { type: "dismiss-stage-lore" }
   | { type: "toggle-pause" }
   | { type: "resume-run" }
   | { type: "exit-run" }
@@ -61,6 +65,10 @@ export function updateSimulation(
       return tickRunOverDelay(cooled, deltaSeconds);
     }
     return cooled;
+  }
+
+  if (state.run.stageLore) {
+    return tickAnnouncement(tickHitEffects(coolScreenFlash(state, deltaSeconds), deltaSeconds), deltaSeconds);
   }
 
   let next = { ...state, run: { ...state.run, time: state.run.time + deltaSeconds } };
@@ -173,8 +181,27 @@ function tickAnnouncement(state: SimulationState, deltaSeconds: number): Simulat
 function applyCommand(state: SimulationState, command: UiCommand): SimulationState {
   switch (command.type) {
     case "start-run":
-      return createRunState(state, command.weaponId);
+      return createRunState(state, command.weaponId, command.runMode ?? "story");
+    case "choose-story-post-clear":
+      if (state.run.status !== "story-clear-pending") {
+        return state;
+      }
+      if (command.choice === "continue") {
+        return advanceStage({
+          ...state,
+          run: { ...state.run, storyArcComplete: true, status: "running" }
+        });
+      }
+      return endRun(state, "cleared");
+    case "dismiss-stage-lore":
+      if (state.run.stageLore) {
+        return { ...state, run: { ...state.run, stageLore: null } };
+      }
+      return state;
     case "toggle-pause":
+      if (state.run.stageLore) {
+        return { ...state, run: { ...state.run, stageLore: null } };
+      }
       if (state.run.status === "running") {
         return { ...state, run: { ...state.run, status: "paused" } };
       }
@@ -398,7 +425,7 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       appliedUpgrades: applied,
       offeredUpgrades: [],
       upgradeOfferSource: "level-up",
-      // 首领击杀常伴随经验升级：先弹出普通三选一时不应吞掉仍待领取的首领宝箱奖励。
+      // 复制体击杀常伴随经验升级：先弹出普通三选一时不应吞掉仍待领取的副本宝箱奖励。
       pendingBossReward:
         state.run.upgradeOfferSource === "level-up" ? state.run.pendingBossReward : null,
       emergencyRepairCharges,
@@ -694,8 +721,12 @@ function spawnBoss(
   const angleRoll = randomFloat(state.rngSeed);
   const angle = angleRoll.value * Math.PI * 2;
   const position = add(state.run.player.position, scale(fromAngle(angle), 420));
-  const radiusScale = (pattern === "artillery" ? 1.42 : 1.28) * (options?.radiusMultiplier ?? 1);
-  const hpScale = (pattern === "artillery" ? 1.14 : 1.06) * (options?.hpMultiplier ?? 1) * (1 + state.run.riskProtocolTier * 0.16);
+  const radiusScale =
+    (pattern === "artillery" ? 1.42 : pattern === "charger" ? 1.28 : 1.55) * (options?.radiusMultiplier ?? 1);
+  const hpScale =
+    (pattern === "artillery" ? 1.14 : pattern === "charger" ? 1.06 : 1.26) *
+    (options?.hpMultiplier ?? 1) *
+    (1 + state.run.riskProtocolTier * 0.16);
   const enemy: EnemyState = {
     id: `e-${state.nextId}`,
     type: "boss",
@@ -706,13 +737,14 @@ function spawnBoss(
     radius: definition.radius * radiusScale,
     hp: definition.health * hpScale,
     maxHp: definition.health * hpScale,
-    fireCooldown: 0.7,
-    skillCooldown: 1.8,
-    secondaryCooldown: 3.4,
+    fireCooldown: pattern === "laser-prime" ? 0.55 : 0.7,
+    skillCooldown: pattern === "laser-prime" ? 2 : 1.8,
+    secondaryCooldown: pattern === "laser-prime" ? 4.2 : 3.4,
     chargeTimer: 0,
     chargeDirection: { x: 0, y: 0 },
     touchCooldown: 0,
-    color: options?.colorOverride ?? (pattern === "artillery" ? 0xff516b : 0xff7a4a)
+    color: options?.colorOverride ?? (pattern === "artillery" ? 0xff516b : pattern === "charger" ? 0xff7a4a : 0x48e8ff),
+    bossLaserPhase: pattern === "laser-prime" ? 0 : undefined
   };
 
   return {
@@ -823,8 +855,8 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
       lastDamageSource =
         enemy.type === "boss"
           ? enemyNext.chargeTimer > 0
-            ? "被首领冲锋正面撞穿"
-            : "被首领近身压制击毁"
+            ? "被复制体冲锋正面撞穿"
+            : "被复制体近身压制击毁"
           : enemy.type === "brute"
             ? "被厚甲单位贴身碾碎"
             : enemy.type === "sniper"
@@ -891,10 +923,22 @@ function getHazardTier(state: SimulationState): number {
   return Math.max(Math.floor(state.run.time / 150), Math.floor((state.run.objective.stage - 1) / 3));
 }
 
+function pointInHazard(point: Vec2, entityRadius: number, hazard: HazardState): boolean {
+  const shape = hazard.shape ?? "circle";
+  if (shape === "circle") {
+    return distance(point, hazard.position) <= hazard.radius + entityRadius;
+  }
+  const ht = hazard.beamHalfThickness ?? hazard.radius * 0.12;
+  const hl = hazard.beamHalfLength ?? hazard.radius;
+  const { x: cx, y: cy } = hazard.position;
+  if (shape === "beam-v") {
+    return Math.abs(point.x - cx) <= ht + entityRadius && Math.abs(point.y - cy) <= hl + entityRadius;
+  }
+  return Math.abs(point.y - cy) <= ht + entityRadius && Math.abs(point.x - cx) <= hl + entityRadius;
+}
+
 function isEnemyInsideHazard(enemy: EnemyState, hazards: HazardState[]): boolean {
-  return hazards.some(
-    (hazard) => hazard.active && distance(enemy.position, hazard.position) <= hazard.radius + enemy.radius
-  );
+  return hazards.some((hazard) => hazard.active && pointInHazard(enemy.position, enemy.radius, hazard));
 }
 
 function updateBossSkills(
@@ -966,6 +1010,79 @@ function updateBossSkills(
     }
   }
 
+  if (enemy.bossPattern === "laser-prime") {
+    if (enemy.skillCooldown <= 0 && distanceToPlayer > 95) {
+      const volleyCount = 5;
+      for (let index = 0; index < volleyCount; index += 1) {
+        const offsetAngle = (index - (volleyCount - 1) / 2) * 0.11;
+        const direction = fromAngle(Math.atan2(toPlayer.y, toPlayer.x) + offsetAngle);
+        projectiles.push({
+          id: `ep-${localNextId}`,
+          source: "enemy",
+          position: add(enemy.position, scale(direction, enemy.radius + 12)),
+          velocity: scale(direction, 255),
+          radius: 6,
+          life: 3.2,
+          damage: 17,
+          color: 0x5cf8ff,
+          pierceLeft: 0,
+          obstaclePierceLeft: 0,
+          explosiveRadius: 0,
+          ricochetLeft: 0,
+          obstacleRicochets: 0,
+          catacombBonusSpent: false,
+          homingStrength: 0,
+          damageChannel: "ranged"
+        });
+        localNextId += 1;
+      }
+      enemy.skillCooldown = 2.65;
+      screenFlash = Math.max(screenFlash, 0.22);
+    }
+
+    if (enemy.secondaryCooldown <= 0) {
+      const playerPos = state.run.player.position;
+      const phase = (enemy.bossLaserPhase ?? 0) % 2;
+      const telegraph = 1.55;
+      const duration = 2.05;
+      const dps = 50;
+      if (phase === 0) {
+        const cx = clamp(playerPos.x, 96, 1184);
+        hazards.push({
+          id: `h-boss-${localNextId}`,
+          position: { x: cx, y: 360 },
+          radius: 400,
+          shape: "beam-v",
+          beamHalfThickness: 46,
+          beamHalfLength: 400,
+          damagePerSecond: dps,
+          active: false,
+          telegraphTime: telegraph,
+          duration,
+          source: "boss"
+        });
+      } else {
+        const cy = clamp(playerPos.y, 72, 648);
+        hazards.push({
+          id: `h-boss-${localNextId}`,
+          position: { x: 640, y: cy },
+          radius: 700,
+          shape: "beam-h",
+          beamHalfThickness: 42,
+          beamHalfLength: 700,
+          damagePerSecond: dps,
+          active: false,
+          telegraphTime: telegraph,
+          duration,
+          source: "boss"
+        });
+      }
+      enemy.bossLaserPhase = (enemy.bossLaserPhase ?? 0) + 1;
+      enemy.secondaryCooldown = 5.4;
+      screenFlash = Math.max(screenFlash, 0.5);
+    }
+  }
+
   return { nextId: localNextId, screenFlash };
 }
 
@@ -1005,12 +1122,12 @@ function maybeOfferPendingBossReward(state: SimulationState): SimulationState {
         rewardType: null
       },
       tutorialHint: legendaryReady
-        ? "三次首领压制已完成，传说奖励已开启。挑一张真正改变上限的核心。"
-        : "首领核心已崩解，史诗奖励箱已打开。趁热把构筑抬到下一个档位。",
+        ? "三次复制体讨伐已完成，传说奖励已开启。挑一张真正改变上限的核心。"
+        : "复制体核心已崩解，史诗奖励箱已打开。趁热把构筑抬到下一个档位。",
       announcement: createAnnouncement(
         state.nextId,
-        legendaryReady ? "传说回响" : "首领宝箱",
-        legendaryReady ? "本次掉落必出传说。选择一张终局级核心。" : "首领已被击破，立即从高阶奖励中挑选一张史诗强化。",
+        legendaryReady ? "传说回响" : "副本宝箱",
+        legendaryReady ? "三选一均为传说品质。任选一张终局级核心。" : "复制体已被击溃，立即从高阶奖励中挑选一张史诗强化。",
         legendaryReady ? "boss" : "upgrade",
         4
       ),
@@ -1390,22 +1507,15 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
       continue;
     }
 
-      enemies = enemies.map((enemy) => {
-        if (distance(enemy.position, hazard.position) >= hazard.radius + enemy.radius) {
-          return enemy;
-        }
-        return {
-          ...enemy,
-          hp: enemy.hp - hazard.damagePerSecond * deltaSeconds * (state.run.appliedUpgrades.includes("fracture-grid") ? 1.35 : 1)
-        };
-      });
-
-    if (distance(state.run.player.position, hazard.position) <= hazard.radius + state.run.player.radius) {
-      const damageResult = applyIncomingDamage(shield, hp, hazard.damagePerSecond * deltaSeconds);
-      shield = damageResult.shield;
-      hp = damageResult.hp;
-      regenDelay = 4;
-    }
+    enemies = enemies.map((enemy) => {
+      if (!pointInHazard(enemy.position, enemy.radius, hazard)) {
+        return enemy;
+      }
+      return {
+        ...enemy,
+        hp: enemy.hp - hazard.damagePerSecond * deltaSeconds * (state.run.appliedUpgrades.includes("fracture-grid") ? 1.35 : 1)
+      };
+    });
   }
 
   enemies = enemies.flatMap((enemy) => {
@@ -1438,8 +1548,8 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
     defeatedBossCount > 0
       ? createAnnouncement(
           nextId,
-          shouldOfferLegendary ? "传说宝箱掉落" : "首领已击破",
-          shouldOfferLegendary ? "第三次首领讨伐完成，传说宝箱已从残骸中析出。" : "首领坠毁，奖励宝箱已掉落到战场。",
+          shouldOfferLegendary ? "传说宝箱掉落" : "复制体已击溃",
+          shouldOfferLegendary ? "第三次复制体讨伐完成，传说宝箱已从残骸中析出。" : "复制体坠毁，奖励宝箱已掉落到战场。",
           "boss",
           4.2
         )
@@ -1447,8 +1557,8 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
   const bossHint =
     defeatedBossCount > 0
       ? shouldOfferLegendary
-        ? "你已经连续击破三次首领。靠近掉落的传说宝箱并交互开启。"
-        : `首领已被击破。靠近掉落的史诗宝箱并交互开启；再击破 ${Math.max(0, 3 - bossLegendaryCharge)} 次首领可获得一次传说奖励。`
+        ? "你已经连续击破三次复制体。靠近掉落的传说宝箱并交互开启。"
+        : `复制体已被击破。靠近掉落的史诗宝箱并交互开启；再击破 ${Math.max(0, 3 - bossLegendaryCharge)} 次复制体可获得一次传说奖励。`
       : state.run.tutorialHint;
 
   return {
@@ -1560,7 +1670,7 @@ function updateHazards(state: SimulationState, deltaSeconds: number): Simulation
       return [];
     }
 
-    if (nextHazard.active && distance(state.run.player.position, nextHazard.position) <= nextHazard.radius + state.run.player.radius) {
+    if (nextHazard.active && pointInHazard(state.run.player.position, state.run.player.radius, nextHazard)) {
       const damageScale = nextHazard.source === "boss" ? 1.2 : 1;
       const damageResult = applyIncomingDamage(shield, hp, nextHazard.damagePerSecond * deltaSeconds * damageScale);
       if (state.run.player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
@@ -1570,7 +1680,11 @@ function updateHazards(state: SimulationState, deltaSeconds: number): Simulation
       }
       shield = damageResult.shield;
       hp = damageResult.hp;
-      lastDamageSource = nextHazard.source === "boss" ? "被首领炮击区域吞没" : "在风暴区里持续失血";
+      const bossHazardCause =
+        nextHazard.shape === "beam-v" || nextHazard.shape === "beam-h"
+          ? "被终幕复写的激光栅格吞没"
+          : "被复制体炮击区域吞没";
+      lastDamageSource = nextHazard.source === "boss" ? bossHazardCause : "在风暴区里持续失血";
       regenDelay = 4;
       screenFlash = Math.max(screenFlash, nextHazard.source === "boss" ? 0.72 : 0.28);
     }
@@ -1666,14 +1780,16 @@ function maybeTriggerBossEvent(state: SimulationState): SimulationState {
       bossAlertTimer: 5,
       announcement: createAnnouncement(
         state.nextId,
-        "首领入场",
-        patternRoll.value > 0.5 ? "炮击型目标已锁定本区，立刻脱离收缩红圈。" : "冲锋型目标已锁定航线，优先横向脱离蓄力线。",
+        "同事复制体入场",
+        patternRoll.value > 0.5
+          ? "技能模型拷出来的炮击型「同事」已锁定本区，立刻脱离收缩红圈。"
+          : "技能模型拷出来的冲锋型「同事」已锁定航线，优先横向脱离蓄力线。",
         "boss"
       ),
       tutorialHint:
         patternRoll.value > 0.5
-          ? "\u9996\u9886\u8fdb\u5165\u6218\u573a\uff1a\u70ae\u51fb\u578b\uff0c\u79bb\u5f00\u7ea2\u5708\u9884\u8b66\u533a\u57df\u3002"
-          : "\u9996\u9886\u8fdb\u5165\u6218\u573a\uff1a\u51b2\u950b\u578b\uff0c\u4fdd\u6301\u4fa7\u5411\u4f4d\u79fb\u907f\u5f00\u76f4\u7ebf\u51b2\u649e\u3002",
+          ? "复制体同事（炮击型）进入战场：离开红圈预警区，别和技能侧生成的假货换命。"
+          : "复制体同事（冲锋型）进入战场：侧向位移躲开直线冲撞。",
     }
   };
   next = spawnBoss(next, patternRoll.value > 0.5 ? "artillery" : "charger");
@@ -1697,7 +1813,7 @@ function maybeOfferLevelUp(state: SimulationState): SimulationState {
     return state;
   }
 
-  // 首领奖励未结算时不要弹出普通升级，否则同一波会连领两次（先构筑/后宝箱）。
+  // 副本奖励未结算时不要弹出普通升级，否则同一波会连领两次（先构筑/后宝箱）。
   if (isBossRewardOutstanding(state.run)) {
     return state;
   }
@@ -1744,6 +1860,31 @@ function updateObjective(state: SimulationState, deltaSeconds: number): Simulati
       };
     }
 
+    if (
+      state.run.runMode === "story" &&
+      !state.run.storyArcComplete &&
+      objective.stage === STORY_FINAL_STAGE
+    ) {
+      return {
+        ...state,
+        nextId: state.nextId + 1,
+        run: {
+          ...state.run,
+          status: "story-clear-pending",
+          tutorialHint:
+            "主线目标已达成：这一轮人类席位暂时保住。选择「继续作战」保留进度进入自由清剿；「结算撤离」直接完成本局并领取奖励。撤离信标仍可使用。",
+          announcement: createAnnouncement(
+            state.nextId,
+            "黑域节点完成",
+            "主线目标已达成。在面板中选择继续作战，或直接结算撤离。",
+            "phase",
+            5
+          ),
+          screenFlash: Math.max(state.run.screenFlash, 0.85)
+        }
+      };
+    }
+
     return advanceStage(state);
   }
 
@@ -1778,7 +1919,7 @@ function updateObjective(state: SimulationState, deltaSeconds: number): Simulati
         ...objective,
         progress: objective.target,
         completed: true,
-        completionFlash: 2.4
+        completionFlash: state.run.runMode === "story" ? 3.2 : 2.4
       },
       tutorialHint: `${objective.title} 已完成，获得 ${objective.rewardShards} 积分入账。`,
       announcement: createAnnouncement(
@@ -1809,9 +1950,10 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
   const nextStage = state.run.objective.stage + 1;
   const cycle = Math.max(0, nextStage - 1);
   const kindIndex = cycle % 3;
+  const runMode = state.run.runMode;
 
   if (kindIndex === 0) {
-    const target = 26 + Math.floor(cycle / 3) * 10;
+    const target = getObjectiveTargetForStage(nextStage, "collect-shards", runMode);
     return {
       id: `objective-${nextStage}`,
       stage: nextStage,
@@ -1832,7 +1974,7 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
   }
 
   if (kindIndex === 1) {
-    const target = 8 + Math.floor(cycle / 3) * 3;
+    const target = getObjectiveTargetForStage(nextStage, "defeat-enemies", runMode);
     return {
       id: `objective-${nextStage}`,
       stage: nextStage,
@@ -1852,7 +1994,7 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
     };
   }
 
-  const target = 24 + Math.floor(cycle / 3) * 6;
+  const target = getObjectiveTargetForStage(nextStage, "survive", runMode);
   return {
     id: `objective-${nextStage}`,
     stage: nextStage,
@@ -1963,7 +2105,8 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
         if (source === "boss-epic" && upgrade.rarity === "common") {
           return false;
         }
-        if (source === "boss-legendary" && !["legendary", "epic"].includes(upgrade.rarity)) {
+        // 传说副本箱：三选一必须全是传说卡（与「必出传说」文案一致）；史诗仅出现在 boss-epic
+        if (source === "boss-legendary" && upgrade.rarity !== "legendary") {
           return false;
         }
         if (source === "level-up" && upgrade.rarity === "legendary") {
@@ -2026,18 +2169,6 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
     }
   }
 
-  if (source === "boss-legendary") {
-    const legendaries = available.filter((u) => u.rarity === "legendary");
-    const epics = available.filter((u) => u.rarity === "epic");
-    const priorityPool = legendaries.length > 0 ? legendaries : epics;
-    if (priorityPool.length > 0) {
-      const pick = pickWeightedUpgrade(priorityPool, seed);
-      seed = pick.seed;
-      selections.push(pick.id);
-      removeUpgradeById(available, pick.id);
-    }
-  }
-
   while (selections.length < 3 && available.length > 0) {
     const pick = pickWeightedUpgrade(available, seed);
     seed = pick.seed;
@@ -2055,14 +2186,14 @@ function updateTutorialHint(state: SimulationState): SimulationState {
 
   const xpCappedForLevel = state.run.player.xp >= state.run.player.xpToNext;
 
-  // 首领奖励未结算但经验已满：强提示先结算，否则无法弹出升级（可能卡阶段）
+  // 副本奖励未结算但经验已满：强提示先结算，否则无法弹出升级（可能卡阶段）
   if (isBossRewardOutstanding(state.run) && xpCappedForLevel && !state.run.bossRewardChest.active && state.run.pendingBossReward != null) {
     return {
       ...state,
       run: {
         ...state.run,
         tutorialHint:
-          "【优先】经验已满，但首领奖励仍未结算。请回到首领被击败的位置附近寻找发光宝箱；靠近后会自动开启，之后才能升级。"
+          "【优先】经验已满，但副本奖励仍未结算。请回到复制体被击败的位置附近寻找发光宝箱；靠近后会自动开启，之后才能升级。"
       }
     };
   }
@@ -2073,20 +2204,20 @@ function updateTutorialHint(state: SimulationState): SimulationState {
     let tutorialHint: string;
     if (xpCappedForLevel) {
       if (withinChest) {
-        tutorialHint = "正在开启首领宝箱… 领取后即可解锁升级并继续推进阶段。";
+        tutorialHint = "正在开启副本宝箱… 领取后即可解锁升级并继续推进阶段。";
       } else {
         tutorialHint =
           state.run.bossRewardChest.rewardType === "boss-legendary"
-            ? "【优先】经验已满，但必须先领取传说首领宝箱才能升级。请尽快靠近发光宝箱直至自动开启。"
-            : "【优先】经验已满，但必须先领取首领宝箱才能升级。请尽快靠近战场上的宝箱直至自动开启。";
+            ? "【优先】经验已满，但必须先领取传说副本宝箱才能升级。请尽快靠近发光宝箱直至自动开启。"
+            : "【优先】经验已满，但必须先领取副本宝箱才能升级。请尽快靠近战场上的宝箱直至自动开启。";
       }
     } else if (withinChest) {
-      tutorialHint = "已进入首领奖励箱范围，正在开启强化。";
+      tutorialHint = "已进入副本奖励箱范围，正在开启强化。";
     } else {
       tutorialHint =
         state.run.bossRewardChest.rewardType === "boss-legendary"
           ? "传说宝箱已掉落。靠近后会自动开启，选择一张终局级强化。"
-          : "首领奖励箱已掉落。靠近后会自动开启，领取本次高阶强化。";
+          : "副本奖励箱已掉落。靠近后会自动开启，领取本次高阶强化。";
     }
     return {
       ...state,
@@ -2144,8 +2275,9 @@ function checkDefeat(state: SimulationState): SimulationState {
 }
 
 function endRun(state: SimulationState, result: RunSummary["result"]): SimulationState {
-  const extractionBonus = (result === "extracted" ? state.run.extraction.rewardMultiplier : 0.55) * (1 + state.run.riskProtocolTier * 0.28);
-  const payout = Math.round(state.run.unbankedShards * extractionBonus * (result === "extracted" ? state.run.player.economyMultiplier : 0.45));
+  const successLike = result === "extracted" || result === "cleared";
+  const extractionBonus = (successLike ? state.run.extraction.rewardMultiplier : 0.55) * (1 + state.run.riskProtocolTier * 0.28);
+  const payout = Math.round(state.run.unbankedShards * extractionBonus * (successLike ? state.run.player.economyMultiplier : 0.45));
   const objectivesCompleted = Math.max(0, state.run.objective.stage - 1 + (state.run.objective.completed ? 1 : 0));
   const keyUpgradeIds = state.run.appliedUpgrades.filter((upgradeId) => upgradeId !== "weapon-tuning");
   const keyUpgradeTitles = keyUpgradeIds
@@ -2157,7 +2289,11 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
       ? `武器 Lv.${state.run.player.weaponLevel}${state.run.riskProtocolTier > 0 ? " · 风险协议已启用" : ""} · 关键升级：${keyUpgradeTitles.join(" / ")}`
       : `武器 Lv.${state.run.player.weaponLevel}${state.run.riskProtocolTier > 0 ? " · 风险协议已启用" : ""} · 本轮主要依靠基础火力推进`;
   const deathReason =
-    result === "extracted" ? "成功撤离，结算完成" : state.run.lastDamageSource || "在持续交火中被压垮";
+    result === "extracted"
+      ? "成功撤离，结算完成"
+      : result === "cleared"
+        ? "战役目标完成，已结算战利品"
+        : state.run.lastDamageSource || "在持续交火中被压垮";
   const summary: RunSummary = {
     result,
     duration: state.run.time,
@@ -2165,7 +2301,7 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     weaponId: state.run.player.weaponId,
     weaponLevel: state.run.player.weaponLevel,
     riskProtocolTier: state.run.riskProtocolTier,
-    shardsBanked: result === "extracted" ? state.run.bankedShards + payout : payout,
+    shardsBanked: successLike ? state.run.bankedShards + payout : payout,
     enemiesDestroyed: state.run.enemiesDestroyed,
     objectivesCompleted,
     highestStage: state.run.objective.stage,
@@ -2209,12 +2345,15 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     run: {
       ...state.run,
       status: "run-over",
+      stageLore: null,
       runOverDelay: result === "dead" ? 1 : 0,
       runSummary: summary,
       tutorialHint:
         result === "extracted"
           ? `本轮成功撤离。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`
-          : `本轮机体损毁。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`,
+          : result === "cleared"
+            ? `本轮战役通关结算。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`
+            : `本轮机体损毁。${summary.buildRecap}。完成 ${summary.objectivesCompleted} 个阶段任务，击破 ${summary.enemiesDestroyed} 个敌人，推进到第 ${summary.highestStage} 阶段。`,
       bankedShards: summary.shardsBanked,
       unbankedShards: 0,
       extraction: {
@@ -2374,6 +2513,19 @@ function createAnnouncement(
   };
 }
 
+function attachStoryStageLore(next: SimulationState): SimulationState {
+  if (next.run.runMode !== "story") {
+    return { ...next, run: { ...next.run, stageLore: null } };
+  }
+  return {
+    ...next,
+    run: {
+      ...next.run,
+      stageLore: { stage: next.run.objective.stage }
+    }
+  };
+}
+
 function advanceStage(state: SimulationState): SimulationState {
   const nextStage = state.run.objective.stage + 1;
   const nextObjective = createNextObjective(state);
@@ -2412,7 +2564,7 @@ function advanceStage(state: SimulationState): SimulationState {
         screenFlash: Math.max(next.run.screenFlash, 0.72)
       }
     };
-    return next;
+    return attachStoryStageLore(next);
   }
 
   if (state.run.objective.stage === 6) {
@@ -2434,15 +2586,46 @@ function advanceStage(state: SimulationState): SimulationState {
         screenFlash: Math.max(next.run.screenFlash, 0.84)
       }
     };
-    return next;
+    return attachStoryStageLore(next);
   }
 
   if (state.run.objective.stage === 9) {
     next = triggerStageBoss(next);
-    return next;
+    return attachStoryStageLore(next);
   }
 
-  return next;
+  if (state.run.objective.stage === 11 && next.run.runMode === "story" && !next.run.storyArcComplete) {
+    const hasPrime = next.run.enemies.some((e) => e.bossPattern === "laser-prime");
+    if (!hasPrime) {
+      next = spawnBoss(next, "laser-prime", {
+        hpMultiplier: 1.72,
+        radiusMultiplier: 1.38,
+        colorOverride: 0x42e8ff
+      });
+      next = {
+        ...next,
+        nextId: next.nextId + 1,
+        run: {
+          ...next.run,
+          bossSpawnCount: Math.max(next.run.bossSpawnCount, 1),
+          bossAlertTimer: Math.max(next.run.bossAlertTimer, 6),
+          announcement: createAnnouncement(
+            next.nextId,
+            "终幕·你的复写",
+            "技能模型用你整段航迹合成的最终镜像；激光栅格展开，纵扫与横扫交替封路。",
+            "boss",
+            5
+          ),
+          tutorialHint:
+            "终幕复写体：最终被复制的你。青蓝光谱、体型更大；激光纵扫与横扫交替预警，侧向滑出预警带。",
+          screenFlash: Math.max(next.run.screenFlash, 1)
+        }
+      };
+    }
+    return attachStoryStageLore(next);
+  }
+
+  return attachStoryStageLore(next);
 }
 
 function spawnEliteWave(state: SimulationState): SimulationState {
@@ -2499,8 +2682,14 @@ function triggerStageBoss(state: SimulationState): SimulationState {
       ...state.run,
       bossSpawnCount: Math.max(state.run.bossSpawnCount, 1) + 1,
       bossAlertTimer: 6,
-      announcement: createAnnouncement(state.nextId, "结点首领", "强化首领已切入本区，先活下来，再找输出窗口。", "boss"),
-      tutorialHint: "第 9 阶段触发强化首领。它的体型、血量和压制能力都高于常规首领。"
+      announcement: createAnnouncement(
+        state.nextId,
+        "结点·同事副本",
+        "技能侧把同事的航迹加料重训后的强化复制体已切入本区，先活下来，再找输出窗口。",
+        "boss"
+      ),
+      tutorialHint:
+        "第 9 阶段触发强化同事复制体：同一套管线加料后的版本，体型与血池高于随机遭遇的复制体。"
     }
   };
 
