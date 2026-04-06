@@ -2169,7 +2169,13 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
         }
         const meta = upgradeTreeMeta[upgrade.id];
         if (meta.parents && !meta.parents.every((parentId) => state.run.appliedUpgrades.includes(parentId))) {
-          if (!relaxEpicParents || (upgrade.rarity !== "epic" && upgrade.rarity !== "legendary" && upgrade.rarity !== "mythic")) {
+          // 副本池放宽 epic+ 前置时，仍禁止「环轨盾阵」跨阶直选（否则会一次拿到 2/3 面盾）。
+          const relaxTier =
+            relaxEpicParents &&
+            (upgrade.rarity === "epic" || upgrade.rarity === "legendary" || upgrade.rarity === "mythic");
+          const orbitStrict =
+            upgrade.id === "orbit-plate-2" || upgrade.id === "orbit-plate-3";
+          if (!relaxTier || orbitStrict) {
             return false;
           }
         }

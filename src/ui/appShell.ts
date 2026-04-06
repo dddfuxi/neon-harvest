@@ -33,11 +33,12 @@ type OnlineRunSession = {
 };
 
 /** 传说奖励 UI 时序（与 styles 中 legendary-card-entry 时长一致） */
-const LEGENDARY_REVEAL_CLICK_GUARD_MS = 220;
-const LEGENDARY_CORE_AUTO_REVEAL_MS = 750;
-const LEGENDARY_CARD_ENTRY_MS = 400;
-const LEGENDARY_CARD_STAGGER_MS = 70;
-const LEGENDARY_CHOICES_TAIL_BUFFER_MS = 80;
+const LEGENDARY_REVEAL_CLICK_GUARD_MS = 100;
+/** 自动展开前仅显示核心 UI，过长会让人觉得「卡不出牌」 */
+const LEGENDARY_CORE_AUTO_REVEAL_MS = 360;
+const LEGENDARY_CARD_ENTRY_MS = 280;
+const LEGENDARY_CARD_STAGGER_MS = 50;
+const LEGENDARY_CHOICES_TAIL_BUFFER_MS = 40;
 
 const categoryMap = {
   weapon: "武器",
@@ -948,7 +949,7 @@ function renderModal(
                   <div class="legendary-core-glow"></div>
                 </div>
                 <strong>传说核心正在析出</strong>
-                <span>${revealInputLocked ? "正在屏蔽误触，稍后可点击展开…" : "约 0.75 秒后自动展开；亦可点击展开"}</span>
+                <span>${revealInputLocked ? "正在屏蔽误触，稍后可点击展开…" : `约 ${(LEGENDARY_CORE_AUTO_REVEAL_MS / 1000).toFixed(1).replace(/\.0$/, "")} 秒后自动展开；亦可点击展开`}</span>
               </button>
             `
             : `
