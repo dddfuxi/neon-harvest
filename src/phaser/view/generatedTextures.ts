@@ -80,6 +80,17 @@ export function createGeneratedTextures(scene: Phaser.Scene): void {
   graphics.generateTexture("fx/extraction", 96, 96);
   graphics.clear();
 
+  graphics.fillStyle(0x2a180a, 1);
+  graphics.fillRoundedRect(4, 12, 56, 40, 10);
+  graphics.fillStyle(0xffc46b, 1);
+  graphics.fillRoundedRect(8, 8, 48, 18, 8);
+  graphics.lineStyle(3, 0xfff0b3, 0.95);
+  graphics.strokeRoundedRect(8, 8, 48, 18, 8);
+  graphics.lineStyle(2, 0x8d4f17, 0.8);
+  graphics.strokeRoundedRect(4, 12, 56, 40, 10);
+  graphics.generateTexture("fx/boss-reward-chest", 64, 64);
+  graphics.clear();
+
   graphics.fillStyle(0x07111f, 1);
   graphics.fillRect(0, 0, 128, 128);
   graphics.lineStyle(1, 0x0b1730, 0.85);

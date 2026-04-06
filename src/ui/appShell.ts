@@ -1,4 +1,5 @@
 import { characterSkillDefinitions } from "../game/content/skills";
+import { weaponModTreeByWeapon, type WeaponModId } from "../game/content/weapons";
 import {
   queueVirtualDash,
   queueVirtualPause,
@@ -12,7 +13,7 @@ import { upgradeBranchLabels, upgradeDefinitions, upgradeTreeMeta, type UpgradeB
 import { weaponDefinitions, type WeaponId } from "../game/content/weapons";
 import { type UiCommand } from "../game/simulation/engine";
 import { metaUpgrades, preRunSupplyDefinitions } from "../game/simulation/meta";
-import { loadState, persistState } from "../game/storage/save";
+import { clearPersistedState, loadState, persistState } from "../game/storage/save";
 import type { LeaderboardEntry, PreRunSupplyId, SimulationState, SkillFeedbackEntry, SkillVoteKind } from "../game/simulation/types";
 import { createGame } from "../phaser/createGame";
 
@@ -31,7 +32,8 @@ const categoryMap = {
 const rarityMap = {
   common: "标准",
   rare: "稀有",
-  epic: "史诗"
+  epic: "史诗",
+  legendary: "传说"
 } as const;
 
 export function createAppShell(root: HTMLElement): void {
@@ -42,6 +44,9 @@ export function createAppShell(root: HTMLElement): void {
   let isUploadingScore = false;
   let leaderboardName = window.localStorage.getItem("neon-harvest-player-name") ?? "";
   let activeRunSession: OnlineRunSession | null = null;
+  let legendaryRewardRevealKey: string | null = null;
+  let legendaryRewardOpened = false;
+  let legendaryRewardTimer: number | null = null;
   const pendingSkillFeedback = new Set<UpgradeId>();
   const commandQueue: UiCommand[] = [];
 
@@ -75,17 +80,62 @@ export function createAppShell(root: HTMLElement): void {
   const rerenderModal = () => {
     const previousMenuShell = modalLayer.querySelector<HTMLElement>(".menu-shell");
     const previousScrollTop = previousMenuShell?.scrollTop ?? 0;
-    renderModal(modalLayer, state, selectedWeapon, onlineLeaderboard, leaderboardNotice, isUploadingScore, leaderboardName, pendingSkillFeedback);
+    renderModal(
+      modalLayer,
+      state,
+      selectedWeapon,
+      onlineLeaderboard,
+      leaderboardNotice,
+      isUploadingScore,
+      leaderboardName,
+      pendingSkillFeedback,
+      legendaryRewardOpened
+    );
     const nextMenuShell = modalLayer.querySelector<HTMLElement>(".menu-shell");
     if (nextMenuShell) {
       nextMenuShell.scrollTop = previousScrollTop;
     }
   };
 
+  const syncLegendaryRewardReveal = () => {
+    const nextKey =
+      state.run.status === "level-up" && state.run.upgradeOfferSource === "boss-legendary"
+        ? `${state.run.announcement?.id ?? "legendary"}:${state.run.offeredUpgrades.join(",")}`
+        : null;
+
+    if (!nextKey) {
+      legendaryRewardRevealKey = null;
+      legendaryRewardOpened = false;
+      if (legendaryRewardTimer !== null) {
+        window.clearTimeout(legendaryRewardTimer);
+        legendaryRewardTimer = null;
+      }
+      return;
+    }
+
+    if (legendaryRewardRevealKey === nextKey) {
+      return;
+    }
+
+    legendaryRewardRevealKey = nextKey;
+    legendaryRewardOpened = false;
+    if (legendaryRewardTimer !== null) {
+      window.clearTimeout(legendaryRewardTimer);
+    }
+    legendaryRewardTimer = window.setTimeout(() => {
+      if (legendaryRewardRevealKey !== nextKey || legendaryRewardOpened) {
+        return;
+      }
+      legendaryRewardOpened = true;
+      rerenderModal();
+    }, 400);
+  };
+
   const renderAll = (next: SimulationState) => {
     state = next;
     persistState(state);
     const touchUiActive = shouldUseTouchUi();
+    syncLegendaryRewardReveal();
     renderHud(hudLayer, state);
     renderTouchFeedback(touchLayer, state);
     rerenderModal();
@@ -143,6 +193,28 @@ export function createAppShell(root: HTMLElement): void {
         commandQueue.push({ type: "exit-run" });
       } else if (command === "upload-score") {
         void uploadLatestScore();
+      } else if (command === "reveal-legendary-reward") {
+        legendaryRewardOpened = true;
+        if (legendaryRewardTimer !== null) {
+          window.clearTimeout(legendaryRewardTimer);
+          legendaryRewardTimer = null;
+        }
+        rerenderModal();
+      } else if (command === "reset-save") {
+        const confirmed = window.confirm("这会清除本地进度、机库改装、图鉴和排行榜。确定要重新开始吗？");
+        if (!confirmed) {
+          return;
+        }
+        clearPersistedState();
+        state = loadState();
+        selectedWeapon = state.meta.unlockedWeapons[0] ?? "pulse-blaster";
+        legendaryRewardRevealKey = null;
+        legendaryRewardOpened = false;
+        if (legendaryRewardTimer !== null) {
+          window.clearTimeout(legendaryRewardTimer);
+          legendaryRewardTimer = null;
+        }
+        renderAll(state);
       }
       return;
     }
@@ -169,6 +241,16 @@ export function createAppShell(root: HTMLElement): void {
     const metaUpgradeButton = target.closest<HTMLElement>("[data-meta-upgrade]");
     if (metaUpgradeButton) {
       commandQueue.push({ type: "buy-meta", upgradeId: metaUpgradeButton.dataset.metaUpgrade! });
+      return;
+    }
+
+    const weaponModButton = target.closest<HTMLElement>("[data-weapon-mod]");
+    if (weaponModButton) {
+      commandQueue.push({
+        type: "buy-weapon-mod",
+        weaponId: weaponModButton.dataset.weaponId as WeaponId,
+        modId: weaponModButton.dataset.weaponMod as WeaponModId
+      });
       return;
     }
 
@@ -377,6 +459,22 @@ export function createAppShell(root: HTMLElement): void {
   }
 }
 
+function renderEconomyHudStrip(state: SimulationState): string {
+  const p = state.run.player;
+  const tagged =
+    state.run.appliedUpgrades.includes("bank-heist") ||
+    state.run.appliedUpgrades.includes("compound-interest") ||
+    state.run.appliedUpgrades.includes("salvage-net");
+  if (!tagged && p.economyMultiplier <= 1.001 && p.xpMultiplier <= 1.001) {
+    return "";
+  }
+  const parts = [`转化×${p.economyMultiplier.toFixed(2)}`, `经验×${p.xpMultiplier.toFixed(2)}`, `未入账 ${state.run.unbankedShards}`];
+  if (state.run.appliedUpgrades.includes("bank-heist")) {
+    parts.push("劫运已生效");
+  }
+  return `<div class="economy-hud-strip"><span class="label">资源倍率</span><div class="body-copy">${parts.join(" · ")}</div></div>`;
+}
+
 function renderHud(container: HTMLElement, state: SimulationState): void {
   if (state.run.status === "menu" || state.run.status === "meta") {
     container.innerHTML = "";
@@ -415,6 +513,7 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
           <div class="mobile-runtime-main">${runMinutes}:${runSeconds}</div>
           <div class="body-copy">${characterSkillDefinitions[state.run.player.characterSkillId].name}</div>
         </div>
+        ${renderEconomyHudStrip(state)}
       </div>
     `;
     return;
@@ -439,6 +538,7 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
         <span class="label">战局状态</span>
         <div><strong>${state.run.extraction.unlocked ? "撤离已开启" : "采集阶段进行中"}</strong></div>
         <div class="body-copy">${state.run.tutorialHint}</div>
+        ${renderEconomyHudStrip(state)}
         <div class="progress"><span style="width:${xpPercent}%"></span></div>
         <div class="body-copy">等级 ${state.run.player.xpLevel}，距离下次升级还差 ${Math.ceil(state.run.player.xpToNext - state.run.player.xp)} 点经验</div>
       </div>
@@ -473,7 +573,8 @@ function renderModal(
   leaderboardNotice: string,
   isUploadingScore: boolean,
   leaderboardName: string,
-  pendingSkillFeedback: ReadonlySet<UpgradeId>
+  pendingSkillFeedback: ReadonlySet<UpgradeId>,
+  legendaryRewardOpened: boolean
 ): void {
   const summary = state.meta.lastRunSummary ?? state.run.runSummary;
   const weapon = weaponDefinitions[selectedWeapon];
@@ -526,7 +627,7 @@ function renderModal(
           </section>
         </div>
         <div class="menu-grid lower">
-          <section class="panel menu-section">
+          <section class="panel menu-section current-weapon-section">
             <div class="section-header">
               <span class="label">当前武器</span>
               <strong>${weapon.name}</strong>
@@ -539,6 +640,7 @@ function renderModal(
               <span>等级 Lv.${state.run.player.weaponLevel}</span>
               <span>穿透 ${weapon.pierce}</span>
             </div>
+            ${renderPreRunSupplies(state, "compact")}
           </section>
           <section class="panel menu-section">
             <div class="section-header">
@@ -552,7 +654,6 @@ function renderModal(
             }
           </section>
         </div>
-        ${renderPreRunSupplies(state)}
         <section class="panel menu-section leaderboard-section">
           <details class="leaderboard-fold">
             <summary class="leaderboard-fold-summary">
@@ -578,39 +679,70 @@ function renderModal(
   }
 
   if (state.run.status === "level-up") {
+    const isLegendaryReward = state.run.upgradeOfferSource === "boss-legendary";
+    const offerTitle =
+      state.run.upgradeOfferSource === "boss-legendary"
+        ? "传说核心析出"
+        : state.run.upgradeOfferSource === "boss-epic"
+          ? "首领宝箱开启"
+          : "选择本轮强化";
+    const offerSubtitle =
+      state.run.upgradeOfferSource === "boss-legendary"
+        ? "这是三次首领击破后的传说奖励。三选一，拿到就是整局质变。"
+        : state.run.upgradeOfferSource === "boss-epic"
+          ? "首领核心崩解后会掉出高阶奖励，本次至少会看到稀有和史诗。"
+          : "先看流派定位，再决定是补短板，还是继续把强项推到极致。";
+    const shouldShowLegendaryCore = isLegendaryReward && !legendaryRewardOpened;
     container.innerHTML = `
-      <div class="modal-card panel">
-        <p class="label">构筑升级</p>
-        <h2 class="screen-title compact">选择本轮强化</h2>
-        <p class="screen-subtitle">先看流派定位，再决定是补短板，还是继续把强项推到极致。</p>
-        <div class="upgrade-grid rich">
-          ${state.run.offeredUpgrades
-            .map((upgradeId) => {
-              const upgrade = upgradeDefinitions[upgradeId];
-              return `
-                <article class="choice-card rarity-${upgrade.rarity}">
-                  <div class="choice-meta">
-                    <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
-                    <span class="rarity-type">${categoryMap[upgrade.category]}</span>
-                  </div>
-                  <h3>${upgrade.title}</h3>
-                  <p>${describeUpgrade(upgrade.id)}</p>
-                  <div class="tag-row">${[
-                    ...upgrade.tags,
-                    ...(upgrade.once ? ["单局唯一"] : [])
-                  ]
-                    .map((tag) => `<span class="tag">${tag}</span>`)
-                    .join("")}</div>
-                  ${renderSkillFeedbackControls(state, upgrade.id, pendingSkillFeedback.has(upgrade.id), "compact")}
-                  <footer class="label">${upgrade.archetype}</footer>
-                  <div class="button-row">
-                    <button type="button" class="button primary choice-confirm-button" data-upgrade="${upgradeId}">选择强化</button>
-                  </div>
-                </article>
-              `;
-            })
-            .join("")}
-        </div>
+      <div class="modal-card panel ${isLegendaryReward ? "legendary-reward-panel" : ""}">
+        <p class="label">${state.run.upgradeOfferSource === "level-up" ? "构筑升级" : "首领奖励"}</p>
+        <h2 class="screen-title compact">${offerTitle}</h2>
+        <p class="screen-subtitle">${offerSubtitle}</p>
+        ${
+          shouldShowLegendaryCore
+            ? `
+              <button type="button" class="legendary-core-reveal" data-command="reveal-legendary-reward">
+                <div class="legendary-core-shell">
+                  <div class="legendary-core-orbit orbit-a"></div>
+                  <div class="legendary-core-orbit orbit-b"></div>
+                  <div class="legendary-core-heart"></div>
+                  <div class="legendary-core-glow"></div>
+                </div>
+                <strong>传说核心正在析出</strong>
+                <span>0.4 秒后自动展开，也可以立即点击开启</span>
+              </button>
+            `
+            : `
+              <div class="upgrade-grid rich ${isLegendaryReward ? "legendary-reward-grid" : ""}">
+                ${state.run.offeredUpgrades
+                  .map((upgradeId, index) => {
+                    const upgrade = upgradeDefinitions[upgradeId];
+                    return `
+                      <article class="choice-card rarity-${upgrade.rarity} ${isLegendaryReward ? "legendary-reward-card" : ""}" style="${isLegendaryReward ? `--entry-delay:${index * 90}ms` : ""}">
+                        <div class="choice-meta">
+                          <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
+                          <span class="rarity-type">${categoryMap[upgrade.category]}</span>
+                        </div>
+                        <h3>${upgrade.title}</h3>
+                        <p>${describeUpgrade(upgrade.id)}</p>
+                        <div class="tag-row">${[
+                          ...upgrade.tags,
+                          ...(upgrade.once ? ["单局唯一"] : [])
+                        ]
+                          .map((tag) => `<span class="tag">${tag}</span>`)
+                          .join("")}</div>
+                        ${renderSkillFeedbackControls(state, upgrade.id, pendingSkillFeedback.has(upgrade.id), "compact")}
+                        <footer class="label">${upgrade.archetype}</footer>
+                        <div class="button-row">
+                          <button type="button" class="button primary choice-confirm-button" data-upgrade="${upgradeId}">选择强化</button>
+                        </div>
+                      </article>
+                    `;
+                  })
+                  .join("")}
+              </div>
+            `
+        }
       </div>
     `;
     return;
@@ -651,6 +783,7 @@ function renderModal(
             ${state.meta.unlockedWeapons.map((weaponId) => renderWeaponCard(weaponId, selectedWeapon)).join("")}
           </div>
         </div>
+        ${renderWeaponArmoryTree(state, selectedWeapon)}
         ${renderSkillCodex(state, pendingSkillFeedback)}
         <div class="card-grid">
           ${metaUpgrades
@@ -669,6 +802,7 @@ function renderModal(
             .join("")}
         </div>
         <div class="button-row">
+          <button type="button" class="button" data-command="reset-save">清空本地存档</button>
           <button type="button" class="button primary" data-command="exit-meta">返回主界面</button>
         </div>
       </div>
@@ -735,16 +869,60 @@ function renderWeaponCard(weaponId: WeaponId, selectedWeapon: WeaponId): string 
   `;
 }
 
-function renderPreRunSupplies(state: SimulationState): string {
-  const stocked = preRunSupplyDefinitions.filter((supply) => (state.meta.supplyInventory[supply.id] ?? 0) > 0);
+function renderWeaponArmoryTree(state: SimulationState, weaponId: WeaponId): string {
+  const mods = weaponModTreeByWeapon[weaponId];
+  const purchased = new Set(state.meta.purchasedWeaponModIds);
+  const weapon = weaponDefinitions[weaponId];
 
   return `
-    <section class="panel menu-section">
+    <section class="panel menu-section armory-section">
+      <div class="section-header">
+        <span class="label">武器库改装</span>
+        <strong>${weapon.name} 改装树</strong>
+      </div>
+      <p class="body-copy">每个改装节点只能购买一次。解锁后会作为局外永久改装，在使用这把武器开局时直接生效。</p>
+      <div class="armory-tree-grid">
+        ${mods
+          .map((mod) => {
+            const bought = purchased.has(mod.id);
+            const unlocked = !mod.parents || mod.parents.every((parentId) => purchased.has(parentId));
+            const afford = state.meta.credits >= mod.cost;
+            const disabled = bought || !unlocked || !afford;
+            const stateLabel = bought ? "已改装" : unlocked ? (afford ? `${mod.cost} 积分` : `需要 ${mod.cost} 积分`) : "需要前置改装";
+            return `
+              <article class="armory-node tier-${mod.tier} ${bought ? "purchased" : unlocked ? "available" : "locked"}">
+                <span class="armory-node-tier">T${mod.tier}</span>
+                <h3>${mod.title}</h3>
+                <p>${mod.description}</p>
+                <div class="tag-row">
+                  ${mod.parents?.map((parentId) => `<span class="tag">前置 ${weaponModTreeByWeapon[weaponId].find((entry) => entry.id === parentId)?.title ?? parentId}</span>`).join("") ?? ""}
+                </div>
+                <footer>${stateLabel}</footer>
+                <div class="button-row">
+                  <button type="button" class="button ${bought ? "" : "primary"}" data-weapon-id="${weaponId}" data-weapon-mod="${mod.id}" ${disabled ? "disabled" : ""}>
+                    ${bought ? "已完成" : "执行改装"}
+                  </button>
+                </div>
+              </article>
+            `;
+          })
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderPreRunSupplies(state: SimulationState, layout: "full" | "compact" = "full"): string {
+  const stocked = preRunSupplyDefinitions.filter((supply) => (state.meta.supplyInventory[supply.id] ?? 0) > 0);
+  const compact = layout === "compact";
+
+  return `
+    <section class="${compact ? "armory-inline-section" : "panel menu-section"}">
       <div class="section-header">
         <span class="label">起始补给</span>
-        <strong>用积分换开局底子</strong>
+        <strong>${compact ? "补给备货" : "用积分换开局底子"}</strong>
       </div>
-      <p class="body-copy">补给只在开局生效，每局开始时自动消耗 1 份，不改变整局上限，只帮你把前期站稳。</p>
+      <p class="body-copy">${compact ? "补给会在下一局开始时自动消耗 1 份并生效。" : "补给只在开局生效，每局开始时自动消耗 1 份，不改变整局上限，只帮你把前期站稳。"}</p>
       ${
         stocked.length > 0
           ? `<div class="build-pill-row">${stocked
@@ -752,7 +930,7 @@ function renderPreRunSupplies(state: SimulationState): string {
               .join("")}</div>`
           : `<p class="body-copy">当前没有库存。先备货，下一局开始时会自动结算并生效。</p>`
       }
-      <div class="card-grid">
+      <div class="${compact ? "compact-supply-grid" : "card-grid"}">
         ${preRunSupplyDefinitions
           .map((supply) => {
             const stock = state.meta.supplyInventory[supply.id] ?? 0;
@@ -761,7 +939,7 @@ function renderPreRunSupplies(state: SimulationState): string {
             const disabled = full || !afford;
             const footer = full ? `库存已满 ${stock}/${supply.maxStock}` : afford ? `${supply.cost} 积分` : `需要 ${supply.cost} 积分`;
             return `
-              <div class="meta-card">
+              <div class="meta-card ${compact ? "compact-supply-card" : ""}">
                 <h3>${supply.name}</h3>
                 <p>${supply.description}</p>
                 <footer>${footer}</footer>
@@ -769,7 +947,7 @@ function renderPreRunSupplies(state: SimulationState): string {
                   <span>库存 ${stock}/${supply.maxStock}</span>
                   <span>开局自动消耗</span>
                 </div>
-                <div class="button-row">
+                <div class="button-row ${compact ? "compact-button-row" : ""}">
                   <button type="button" class="button" data-supply="${supply.id}" ${disabled ? "disabled" : ""}>${full ? "已备满" : "购买补给"}</button>
                 </div>
               </div>
@@ -810,11 +988,11 @@ function renderCombatDemo(weapon: (typeof weaponDefinitions)[WeaponId]): string 
     weapon.id === "shard-lance"
       ? "高伤直线贯穿"
       : weapon.id === "arc-caster"
-        ? "近距散射压制"
+        ? "贴脸扇面压制"
         : weapon.id === "nova-driver"
           ? "高频爆发喷射"
           : weapon.id === "rift-carbine"
-            ? "中距快节奏追射"
+            ? "中远距精准追射"
             : "稳定连续点射";
   return `
     <div class="demo-panel ${variantClass}">
@@ -897,31 +1075,39 @@ function describeUpgrade(upgradeId: keyof typeof upgradeDefinitions): string {
     "weapon-tuning": `当前武器等级 +1。每级提高伤害、射速和弹速。${repeatable}`,
     "overclock-rounds": `伤害 +18%。${repeatable}`,
     "heat-sink": `射速 +8%，弹速 +5%。${repeatable}`,
-    "kinetic-echo": `子弹额外穿透 1 个敌人。${repeatable}`,
+    "kinetic-echo": `子弹额外穿透 2 个敌人。${repeatable}`,
     "phase-cooling": `最大护盾 +20，并立刻恢复 20 点护盾。${repeatable}`,
     "ion-shell": `受到的伤害降低 12%。${repeatable}`,
     "rapid-cycle": `射速 +20%。${repeatable}`,
     "blink-drive": `冲刺冷却缩短 18%，冲刺距离 +26。${repeatable}`,
     "repulsor-fins": `移动速度 +12%，碎片吸附范围 +34。${repeatable}`,
-    "salvage-net": `经验获取 +20%。${repeatable}`,
-    "compound-interest": `局内收益倍率 +18%。${repeatable}`,
+    "salvage-net": `经验获取 +20%；拾取碎片时有轻微屏幕闪烁反馈。${repeatable}`,
+    "compound-interest": `局内收益倍率 +18%；获得时立刻将 18 点积分记入已入账池。${repeatable}`,
     "pressure-core": `立刻获得 6% 伤害和 4% 弹速加成；撤离开启后再额外提高伤害。${repeatable}`,
     "auto-forge": `最大护盾 +10，立刻恢复 18 点护盾；之后每次升级再恢复 18 点护盾。${repeatable}`,
     "lattice-armor": `最大生命 +28，并立刻恢复 28 点生命。${repeatable}`,
-    "fracture-grid": `现有危险区立刻扩大并增强伤害；身处危险区内的敌人额外承受 14% 子弹伤害。${repeatable}`,
+    "fracture-grid": `现有危险区立刻扩大并增强伤害；身处危险区内的敌人额外承受 14% 子弹伤害；持有期间环境威胁阶段推进更快（等效 +1 阶）。${repeatable}`,
     "weapon-swap": `把当前武器切换为电弧发射器。${repeatable}`,
     "twin-fang": `额外 +1 发并列子弹。${repeatable}`,
-    triptych: `最少变为三联发，但射速降低 8%。${repeatable}`,
+    triptych: `扇形再 +2 发（单发武器上合计为三联）；与双牙并列叠加可达四连发。射速降低 8%。${repeatable}`,
+    "sidewinder-rack": `额外解锁左右两侧副炮，射速 +8%，弹速 +4%。${repeatable}`,
     "rear-array": `身后追加一发自动副炮。${repeatable}`,
-    "catacomb-rounds": `子弹额外获得 1 次弹射。${repeatable}`,
+    "catacomb-rounds": `子弹额外获得 1 次弹射；障碍弹射后首次命中敌人的伤害 +22%。${repeatable}`,
     "halo-shards": `击杀敌人时额外释放一圈裂片弹。${repeatable}`,
+    "supernova-heart": `额外 +2 发主弹，射速 +15%，爆裂半径提升，并强制开启击杀裂片。${repeatable}`,
     "seeker-lens": `子弹追踪强度 +0.22，弹速 +6%，边缘目标更容易命中。${repeatable}`,
     "giant-core": `弹体尺寸 +32%，伤害 +8%，弹速 -8%。${repeatable}`,
-    "blood-siphon": `造成伤害时获得 3.5% 吸血。${repeatable}`,
+    "zero-point-lattice": `伤害 +35%，弹体尺寸 +22%，弹速 +8%，额外穿透 +2，并附带少量追踪。${repeatable}`,
+    "blood-siphon": `造成伤害时获得 5% 吸血；单次回复较高时会在机体位置显示绿色闪光。${repeatable}`,
+    "aegis-surge": `最大护盾 +34，立刻回盾 34，最大生命 +24，减伤 +8%。${repeatable}`,
+    "phoenix-protocol": `最大生命 +56，最大护盾 +40，吸血 +4%，减伤 +10%，并额外获得 1 次应急修复。${repeatable}`,
     "ghost-shell": `子弹命中后附带小范围爆炸，并额外穿透 1 个敌人。${repeatable}`,
-    "bank-heist": `收益倍率 +14%，经验获取 +10%。${repeatable}`,
-    "survey-array": `视野范围 +70。${repeatable}`,
-    "deep-radar": `视野范围 +120。${repeatable}`
+    "bank-heist": `收益倍率 +14%，经验获取 +10%；战局 HUD 会显示未入账碎片、资源倍率与「劫运已生效」。${repeatable}`,
+    "survey-array": `视野范围 +95。${repeatable}`,
+    "deep-radar": `视野范围 +155。${repeatable}`,
+    "vector-plate": `在瞄准朝向上展开窄屏障，拦截敌方远程弹体；不挡近身接触。${repeatable}`,
+    "orbit-plates": `三面屏障绕机体公转，拦截远程弹体（与向矢偏转板同时持有时以本效果为准）；不挡近身。${repeatable}`,
+    "salvo-duel": `我方弹体与敌方远程弹体相撞时双方同时湮灭。${repeatable}`
   };
 
   return descriptions[upgradeId];
@@ -991,31 +1177,35 @@ function renderSkillCodex(state: SimulationState, pendingSkillFeedback: Readonly
 
   return `
     <div class="panel menu-section">
-      <div class="section-header">
-        <span class="label">技能图鉴</span>
-        <strong>已收录 ${discoveredCount} / ${allSkills.length}</strong>
-      </div>
-      <div class="skill-codex-grid">
-        ${allSkills
-          .map((upgradeId) => {
-            const unlocked = discovered.has(upgradeId);
-            const upgrade = upgradeDefinitions[upgradeId];
-            const meta = upgradeTreeMeta[upgradeId];
-            return `
-              <article class="meta-card codex-card ${unlocked ? "discovered" : "locked"}">
-                <div class="choice-meta">
-                  <span class="rarity-pill">${upgradeBranchLabels[meta.branch]}</span>
-                  <span class="rarity-type">T${meta.tier}</span>
-                </div>
-                <h3>${unlocked ? upgrade.title : "未发现技能"}</h3>
-                <p>${unlocked ? meta.codexSummary : "首次在战斗中拿到这个技能后，会永久收录进图鉴。"}</p>
-                ${renderSkillFeedbackControls(state, upgradeId, pendingSkillFeedback.has(upgradeId), "codex", !unlocked)}
-                <footer>${unlocked ? upgrade.archetype : "等待解锁"}</footer>
-              </article>
-            `;
-          })
-          .join("")}
-      </div>
+      <details class="leaderboard-fold">
+        <summary class="leaderboard-fold-summary">
+          <div class="section-header">
+            <span class="label">技能图鉴</span>
+            <strong>已收录 ${discoveredCount} / ${allSkills.length}</strong>
+          </div>
+        </summary>
+        <div class="skill-codex-grid">
+          ${allSkills
+            .map((upgradeId) => {
+              const unlocked = discovered.has(upgradeId);
+              const upgrade = upgradeDefinitions[upgradeId];
+              const meta = upgradeTreeMeta[upgradeId];
+              return `
+                <article class="meta-card codex-card ${unlocked ? "discovered" : "locked"}">
+                  <div class="choice-meta">
+                    <span class="rarity-pill">${upgradeBranchLabels[meta.branch]}</span>
+                    <span class="rarity-type">T${meta.tier}</span>
+                  </div>
+                  <h3>${unlocked ? upgrade.title : "未发现技能"}</h3>
+                  <p>${unlocked ? meta.codexSummary : "首次在战斗中拿到这个技能后，会永久收录进图鉴。"}</p>
+                  ${renderSkillFeedbackControls(state, upgradeId, pendingSkillFeedback.has(upgradeId), "codex", !unlocked)}
+                  <footer>${unlocked ? upgrade.archetype : "等待解锁"}</footer>
+                </article>
+              `;
+            })
+            .join("")}
+        </div>
+      </details>
     </div>
   `;
 }

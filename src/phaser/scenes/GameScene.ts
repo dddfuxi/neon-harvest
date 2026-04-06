@@ -26,7 +26,9 @@ type SpriteRegistry = {
   enemyIndicators?: Phaser.GameObjects.Graphics;
   player?: Phaser.GameObjects.Sprite;
   playerShield?: Phaser.GameObjects.Arc;
+  barrierWards?: Phaser.GameObjects.Graphics;
   extraction?: Phaser.GameObjects.Sprite;
+  bossRewardChest?: Phaser.GameObjects.Sprite;
   obstacles: Map<string, Phaser.GameObjects.Shape>;
   hazards: Map<string, Phaser.GameObjects.Arc>;
   enemies: Map<string, Phaser.GameObjects.Sprite>;
@@ -96,7 +98,9 @@ export class GameScene extends Phaser.Scene {
 
     this.registryView.player = this.add.sprite(640, 360, getPlayerTextureKey("pulse-blaster")).setDepth(5);
     this.registryView.playerShield = this.add.circle(640, 360, 24).setStrokeStyle(3, 0x6cf3ff, 0.75).setFillStyle(0x6cf3ff, 0.05).setDepth(4.5);
+    this.registryView.barrierWards = this.add.graphics().setDepth(4.85);
     this.registryView.extraction = this.add.sprite(1100, 110, "fx/extraction").setAlpha(0.35).setVisible(false);
+    this.registryView.bossRewardChest = this.add.sprite(0, 0, "fx/boss-reward-chest").setAlpha(0.9).setVisible(false).setDepth(4.9);
 
     this.inputController = new InputController(this);
     this.scale.on("resize", this.handleResize, this);
@@ -130,6 +134,7 @@ export class GameScene extends Phaser.Scene {
     if (!current.run.objective.completed && next.run.objective.completed) {
       this.playObjectiveCompleteSequence(next);
     }
+    this.handleBossDefeats(current, next);
     this.handleRunTransitions(next);
     this.renderState(next);
   }
@@ -170,6 +175,48 @@ export class GameScene extends Phaser.Scene {
     playerShield.setStrokeStyle(2 + shieldRatio * 2, weaponTint, 0.3 + shieldRatio * 0.55);
     playerShield.setFillStyle(weaponTint, 0.03 + shieldRatio * 0.08);
     playerShield.setVisible(shieldRatio > 0.02);
+    const barrierG = this.registryView.barrierWards;
+    if (barrierG) {
+      barrierG.clear();
+      const applied = state.run.appliedUpgrades;
+      const hasOrbit = applied.includes("orbit-plates");
+      const hasAim = applied.includes("vector-plate") && !hasOrbit;
+      if (hasOrbit || hasAim) {
+        const px = state.run.player.position.x;
+        const py = state.run.player.position.y;
+        const p = state.run.player;
+        barrierG.lineStyle(4, 0x9ae8ff, 0.88);
+        if (hasOrbit) {
+          const orbitR = 46;
+          const halfW = 28;
+          const phase = p.barrierOrbitPhase ?? 0;
+          for (let i = 0; i < 3; i += 1) {
+            const ang = phase + (i * Math.PI * 2) / 3;
+            const rx = Math.cos(ang);
+            const ry = Math.sin(ang);
+            const mx = px + rx * orbitR;
+            const my = py + ry * orbitR;
+            const tx = -ry;
+            const ty = rx;
+            barrierG.lineBetween(mx - tx * halfW, my - ty * halfW, mx + tx * halfW, my + ty * halfW);
+          }
+        } else {
+          const d = p.lastAimDirection ?? { x: 1, y: 0 };
+          const len = Math.hypot(d.x, d.y);
+          const nx = len > 0.01 ? d.x / len : 1;
+          const ny = len > 0.01 ? d.y / len : 0;
+          const mx = px + nx * 40;
+          const my = py + ny * 40;
+          const pxv = -ny;
+          const pyv = nx;
+          const halfW = 32;
+          barrierG.lineBetween(mx - pxv * halfW, my - pyv * halfW, mx + pxv * halfW, my + pyv * halfW);
+        }
+        barrierG.setVisible(true);
+      } else {
+        barrierG.setVisible(false);
+      }
+    }
     this.cameras.main.centerOn(state.run.player.position.x, state.run.player.position.y);
     background.tilePositionX = state.run.player.position.x - this.scale.width * 0.5;
     background.tilePositionY = state.run.player.position.y - this.scale.height * 0.5;
@@ -188,6 +235,14 @@ export class GameScene extends Phaser.Scene {
     extraction.setScale(state.run.extraction.radius / 40);
     extraction.setAlpha(state.run.extraction.active ? 0.95 : 0.38);
     extraction.setAngle(extraction.angle + 0.5);
+
+    const bossRewardChest = this.registryView.bossRewardChest!;
+    bossRewardChest.setVisible(state.run.bossRewardChest.active);
+    bossRewardChest.setPosition(state.run.bossRewardChest.position.x, state.run.bossRewardChest.position.y);
+    bossRewardChest.setScale(state.run.bossRewardChest.rewardType === "boss-legendary" ? 1.16 : 1);
+    bossRewardChest.setAlpha(state.run.bossRewardChest.active ? 0.96 : 0);
+    bossRewardChest.setAngle(Math.sin(this.time.now / 260) * 3);
+    bossRewardChest.setTint(state.run.bossRewardChest.rewardType === "boss-legendary" ? 0xfff0b3 : 0xffffff);
 
     syncCollection<Phaser.GameObjects.Shape>(
       state.run.obstacles.map((obstacle) => ({
@@ -263,6 +318,7 @@ export class GameScene extends Phaser.Scene {
           view.setRotation(Math.atan2(projectile.velocity.y, projectile.velocity.x));
           view.setFillStyle(projectile.color, style.alpha);
           view.setStrokeStyle(style.strokeWidth, 0xffffff, style.strokeAlpha);
+          view.setBlendMode(style.blendMode ?? Phaser.BlendModes.NORMAL);
           if (view instanceof Phaser.GameObjects.Rectangle) {
             view.setSize(style.width, style.height);
           } else if (view instanceof Phaser.GameObjects.Ellipse) {
@@ -369,6 +425,169 @@ export class GameScene extends Phaser.Scene {
       duration: 420,
       ease: "Cubic.easeOut",
       onComplete: () => ring.destroy()
+    });
+  }
+
+  private handleBossDefeats(previous: SimulationState, next: SimulationState): void {
+    const nextBossIds = new Set(next.run.enemies.filter((enemy) => enemy.type === "boss").map((enemy) => enemy.id));
+    for (const boss of previous.run.enemies) {
+      if (boss.type !== "boss" || nextBossIds.has(boss.id)) {
+        continue;
+      }
+      this.playBossDefeatSequence(boss);
+    }
+  }
+
+  private playBossDefeatSequence(boss: SimulationState["run"]["enemies"][number]): void {
+    const sprite = this.registryView.enemies.get(boss.id);
+    const healthBar = this.registryView.enemyHealthBars.get(boss.id);
+    const center = { x: boss.position.x, y: boss.position.y };
+    const burstColor = boss.color;
+
+    if (sprite) {
+      this.tweens.add({
+        targets: sprite,
+        alpha: 0,
+        scaleX: sprite.scaleX * 0.68,
+        scaleY: sprite.scaleY * 1.26,
+        angle: sprite.angle + 18,
+        duration: 340,
+        ease: "Cubic.easeOut",
+        onComplete: () => sprite.destroy()
+      });
+      this.registryView.enemies.delete(boss.id);
+    }
+
+    if (healthBar) {
+      this.tweens.add({
+        targets: healthBar,
+        alpha: 0,
+        scaleX: 1.8,
+        duration: 220,
+        ease: "Quad.easeOut",
+        onComplete: () => healthBar.destroy()
+      });
+      this.registryView.enemyHealthBars.delete(boss.id);
+    }
+
+    this.cameras.main.flash(180, 255, 92, 124, false);
+    this.cameras.main.shake(260, 0.0044);
+    this.playBossDefeatBanner();
+
+    const flash = this.add.circle(center.x, center.y, 24, 0xffffff, 0.92).setDepth(6.7);
+    this.tweens.add({
+      targets: flash,
+      radius: boss.radius * 3.8,
+      alpha: 0,
+      duration: 380,
+      ease: "Quad.easeOut",
+      onComplete: () => flash.destroy()
+    });
+
+    const halo = this.add.circle(center.x, center.y, boss.radius * 0.9, burstColor, 0.24).setDepth(6.45);
+    this.tweens.add({
+      targets: halo,
+      radius: boss.radius * 5.6,
+      alpha: 0,
+      duration: 980,
+      ease: "Sine.easeOut",
+      onComplete: () => halo.destroy()
+    });
+
+    const particleCount = 56;
+    for (let index = 0; index < particleCount; index += 1) {
+      const angle = (Math.PI * 2 * index) / particleCount + Phaser.Math.FloatBetween(-0.1, 0.1);
+      const distance = Phaser.Math.Between(Math.round(boss.radius * 1.8), Math.round(boss.radius * 6.2));
+      const size = Phaser.Math.FloatBetween(3.5, 8.5);
+      const particle = this.add.circle(center.x, center.y, size, burstColor, 0.95).setDepth(6.55);
+      this.tweens.add({
+        targets: particle,
+        x: center.x + Math.cos(angle) * distance,
+        y: center.y + Math.sin(angle) * distance,
+        alpha: 0,
+        scale: Phaser.Math.FloatBetween(0.4, 1.7),
+        duration: 900 + Phaser.Math.Between(0, 240),
+        ease: "Cubic.easeOut",
+        onComplete: () => particle.destroy()
+      });
+    }
+
+    for (let index = 0; index < 10; index += 1) {
+      const angle = (Math.PI * 2 * index) / 10 + Phaser.Math.FloatBetween(-0.06, 0.06);
+      const ray = this.add
+        .rectangle(center.x, center.y, boss.radius * 2.8, 7, 0xffffff, 0.72)
+        .setRotation(angle)
+        .setDepth(6.6)
+        .setBlendMode(Phaser.BlendModes.ADD);
+      this.tweens.add({
+        targets: ray,
+        alpha: 0,
+        scaleX: 0.18,
+        scaleY: 1.8,
+        duration: 260,
+        ease: "Quad.easeOut",
+        onComplete: () => ray.destroy()
+      });
+    }
+  }
+
+  private playBossDefeatBanner(): void {
+    const centerX = this.scale.width * 0.5;
+    const centerY = this.scale.height * 0.28;
+    const flash = this.add.rectangle(centerX, centerY, 420, 108, 0xff5c7c, 0.16).setScrollFactor(0).setDepth(10.1);
+    const title = this.add
+      .text(centerX, centerY - 8, "BOSS DOWN", {
+        fontFamily: "Trebuchet MS, Segoe UI, sans-serif",
+        fontSize: "48px",
+        fontStyle: "700",
+        color: "#fff1f4",
+        stroke: "#ff3657",
+        strokeThickness: 10
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(10.2)
+      .setAlpha(0);
+    const subtitle = this.add
+      .text(centerX, centerY + 32, "首领坠毁 · 高阶奖励已析出", {
+        fontFamily: "Trebuchet MS, Segoe UI, sans-serif",
+        fontSize: "18px",
+        fontStyle: "700",
+        color: "#ffd7de"
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(10.2)
+      .setAlpha(0);
+
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      scaleX: 1.08,
+      scaleY: 1.2,
+      duration: 520,
+      ease: "Quad.easeOut",
+      onComplete: () => flash.destroy()
+    });
+    this.tweens.add({
+      targets: title,
+      alpha: 1,
+      scale: 1.08,
+      duration: 180,
+      ease: "Back.easeOut",
+      yoyo: true,
+      hold: 220,
+      onComplete: () => title.destroy()
+    });
+    this.tweens.add({
+      targets: subtitle,
+      alpha: 1,
+      y: centerY + 24,
+      duration: 180,
+      ease: "Quad.easeOut",
+      yoyo: true,
+      hold: 180,
+      onComplete: () => subtitle.destroy()
     });
   }
 
@@ -627,21 +846,24 @@ export class GameScene extends Phaser.Scene {
       .sort((a, b) => distanceToPlayer(a.position.x, a.position.y, state) - distanceToPlayer(b.position.x, b.position.y, state))
       .slice(0, 8);
 
-    for (const enemy of offscreenEnemies) {
-      const screenX = (enemy.position.x - camera.worldView.x) * camera.zoom;
-      const screenY = (enemy.position.y - camera.worldView.y) * camera.zoom;
+    const drawScreenEdgeArrow = (
+      worldX: number,
+      worldY: number,
+      size: number,
+      color: number,
+      alpha: number,
+      strokeAlphaScale: number
+    ): void => {
+      const screenX = (worldX - camera.worldView.x) * camera.zoom;
+      const screenY = (worldY - camera.worldView.y) * camera.zoom;
       const dx = screenX - centerX;
       const dy = screenY - centerY;
       const length = Math.max(1, Math.hypot(dx, dy));
       const angle = Math.atan2(dy, dx);
       const px = centerX + (dx / length) * indicatorRadius;
       const py = centerY + (dy / length) * indicatorRadius;
-      const size = enemy.type === "boss" ? 13 : 9;
-      const color = enemy.type === "boss" ? 0xff4a63 : getEnemyTint(enemy.color, enemy.hp / enemy.maxHp);
-      const alpha = enemy.type === "boss" ? 0.96 : 0.72;
-
       graphics.fillStyle(color, alpha);
-      graphics.lineStyle(2, 0xffffff, alpha * 0.45);
+      graphics.lineStyle(2, 0xffffff, alpha * strokeAlphaScale);
       graphics.beginPath();
       graphics.moveTo(px + Math.cos(angle) * size, py + Math.sin(angle) * size);
       graphics.lineTo(px + Math.cos(angle + 2.45) * size, py + Math.sin(angle + 2.45) * size);
@@ -649,6 +871,30 @@ export class GameScene extends Phaser.Scene {
       graphics.closePath();
       graphics.fillPath();
       graphics.strokePath();
+    };
+
+    for (const enemy of offscreenEnemies) {
+      const size = enemy.type === "boss" ? 13 : 9;
+      const color = enemy.type === "boss" ? 0xff4a63 : getEnemyTint(enemy.color, enemy.hp / enemy.maxHp);
+      const alpha = enemy.type === "boss" ? 0.96 : 0.72;
+      drawScreenEdgeArrow(enemy.position.x, enemy.position.y, size, color, alpha, 0.45);
+    }
+
+    const chest = state.run.bossRewardChest;
+    if (
+      chest.active &&
+      chest.rewardType &&
+      distanceToPlayer(chest.position.x, chest.position.y, state) > state.run.player.visionRadius * 1.04
+    ) {
+      const isLegendary = chest.rewardType === "boss-legendary";
+      drawScreenEdgeArrow(
+        chest.position.x,
+        chest.position.y,
+        12,
+        isLegendary ? 0xffc46b : 0x6cf3ff,
+        isLegendary ? 0.94 : 0.88,
+        0.5
+      );
     }
   }
 
@@ -715,23 +961,78 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (effect.kind === "pierce-trail") {
-      const trail = this.add.rectangle(effect.position.x, effect.position.y, 52, 4, effect.color, 0.45).setDepth(6.3);
-      const glow = this.add.rectangle(effect.position.x, effect.position.y, 24, 2, 0xffffff, 0.8).setDepth(6.4);
+      const trail = this.add.rectangle(effect.position.x, effect.position.y, 68, 5, effect.color, 0.52).setDepth(6.3);
+      const glow = this.add.rectangle(effect.position.x, effect.position.y, 36, 3, 0xffffff, 0.9).setDepth(6.4);
+      const ring = this.add.circle(effect.position.x, effect.position.y, 8, effect.color, 0.16).setDepth(6.32);
       this.tweens.add({
         targets: trail,
-        scaleX: 1.45,
+        scaleX: 1.8,
         alpha: 0,
-        duration: 160,
+        duration: 180,
         ease: "Sine.easeOut",
         onComplete: () => trail.destroy()
       });
       this.tweens.add({
         targets: glow,
-        scaleX: 1.8,
+        scaleX: 2.1,
         alpha: 0,
-        duration: 110,
+        duration: 130,
         ease: "Quad.easeOut",
         onComplete: () => glow.destroy()
+      });
+      this.tweens.add({
+        targets: ring,
+        radius: 24,
+        alpha: 0,
+        duration: 160,
+        ease: "Quad.easeOut",
+        onComplete: () => ring.destroy()
+      });
+      return;
+    }
+
+    if (effect.kind === "heal-glint") {
+      const core = this.add.circle(effect.position.x, effect.position.y, 7, effect.color, 0.88).setDepth(6.55);
+      const ring = this.add.circle(effect.position.x, effect.position.y, 12, effect.color, 0.22).setDepth(6.52);
+      this.tweens.add({
+        targets: core,
+        y: effect.position.y - 20,
+        alpha: 0,
+        scale: 1.4,
+        duration: 300,
+        ease: "Cubic.easeOut",
+        onComplete: () => core.destroy()
+      });
+      this.tweens.add({
+        targets: ring,
+        radius: 32,
+        alpha: 0,
+        duration: 260,
+        ease: "Sine.easeOut",
+        onComplete: () => ring.destroy()
+      });
+      return;
+    }
+
+    if (effect.kind === "barrier-block") {
+      const ring = this.add.circle(effect.position.x, effect.position.y, 8, effect.color, 0.35).setDepth(6.42);
+      const flare = this.add.rectangle(effect.position.x, effect.position.y, 22, 4, 0xffffff, 0.82).setDepth(6.44);
+      this.tweens.add({
+        targets: ring,
+        radius: 22,
+        alpha: 0,
+        duration: 160,
+        ease: "Quad.easeOut",
+        onComplete: () => ring.destroy()
+      });
+      flare.setRotation(Phaser.Math.FloatBetween(-0.25, 0.25));
+      this.tweens.add({
+        targets: flare,
+        scaleX: 1.8,
+        alpha: 0,
+        duration: 140,
+        ease: "Cubic.easeOut",
+        onComplete: () => flare.destroy()
       });
       return;
     }
@@ -761,6 +1062,12 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    if (state.run.status === "level-up" && state.run.upgradeOfferSource !== "level-up") {
+      this.playBossRewardReveal(state.run.upgradeOfferSource);
+      this.previousAnnouncementId = nextAnnouncementId;
+      return;
+    }
+
     const tone = state.run.announcement?.tone ?? "phase";
     if (tone === "boss") {
       this.cameras.main.flash(170, 255, 74, 99, false);
@@ -774,6 +1081,74 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.previousAnnouncementId = nextAnnouncementId;
+  }
+
+  private playBossRewardReveal(source: SimulationState["run"]["upgradeOfferSource"]): void {
+    const isLegendary = source === "boss-legendary";
+    const centerX = this.scale.width * 0.5;
+    const centerY = this.scale.height * 0.23;
+    const primaryColor = isLegendary ? 0xffc46b : 0xff6aa8;
+    const accentColor = isLegendary ? 0xfff0b3 : 0xffffff;
+
+    this.cameras.main.flash(isLegendary ? 260 : 200, isLegendary ? 255 : 255, isLegendary ? 196 : 106, isLegendary ? 107 : 168, false);
+    this.cameras.main.shake(isLegendary ? 260 : 190, isLegendary ? 0.0048 : 0.0034);
+
+    const ring = this.add.circle(centerX, centerY, 42, primaryColor, isLegendary ? 0.22 : 0.16).setScrollFactor(0).setDepth(9.7);
+    this.tweens.add({
+      targets: ring,
+      radius: isLegendary ? 280 : 220,
+      alpha: 0,
+      duration: isLegendary ? 620 : 480,
+      ease: "Cubic.easeOut",
+      onComplete: () => ring.destroy()
+    });
+
+    const halo = this.add.circle(centerX, centerY, 20, accentColor, 0.82).setScrollFactor(0).setDepth(9.8);
+    this.tweens.add({
+      targets: halo,
+      radius: isLegendary ? 92 : 74,
+      alpha: 0,
+      duration: 260,
+      ease: "Quad.easeOut",
+      onComplete: () => halo.destroy()
+    });
+
+    const rayCount = isLegendary ? 14 : 10;
+    for (let index = 0; index < rayCount; index += 1) {
+      const angle = (Math.PI * 2 * index) / rayCount;
+      const ray = this.add
+        .rectangle(centerX, centerY, isLegendary ? 180 : 132, isLegendary ? 7 : 5, primaryColor, 0.7)
+        .setScrollFactor(0)
+        .setDepth(9.75)
+        .setRotation(angle)
+        .setBlendMode(Phaser.BlendModes.ADD);
+      this.tweens.add({
+        targets: ray,
+        alpha: 0,
+        scaleX: 0.2,
+        scaleY: isLegendary ? 1.5 : 1.3,
+        duration: isLegendary ? 360 : 280,
+        ease: "Quad.easeOut",
+        onComplete: () => ray.destroy()
+      });
+    }
+
+    const particleCount = isLegendary ? 28 : 18;
+    for (let index = 0; index < particleCount; index += 1) {
+      const angle = Phaser.Math.FloatBetween(-Math.PI, Math.PI);
+      const distance = Phaser.Math.Between(isLegendary ? 84 : 56, isLegendary ? 260 : 180);
+      const particle = this.add.circle(centerX, centerY, Phaser.Math.FloatBetween(2.5, isLegendary ? 6.5 : 5), primaryColor, 0.9).setScrollFactor(0).setDepth(9.72);
+      this.tweens.add({
+        targets: particle,
+        x: centerX + Math.cos(angle) * distance,
+        y: centerY + Math.sin(angle) * distance * Phaser.Math.FloatBetween(0.55, 1),
+        alpha: 0,
+        scale: Phaser.Math.FloatBetween(0.4, 1.5),
+        duration: isLegendary ? 900 : 620,
+        ease: "Cubic.easeOut",
+        onComplete: () => particle.destroy()
+      });
+    }
   }
 }
 
@@ -852,17 +1227,19 @@ function getProjectileRenderStyle(projectile: SimulationState["run"]["projectile
   strokeAlpha: number;
   scaleX: number;
   scaleY: number;
+  blendMode?: Phaser.BlendModes;
 } {
   if (projectile.source === "enemy") {
     return {
       kind: "rect",
       width: projectile.radius * 3.1,
       height: projectile.radius * 1.9,
-      alpha: 0.82,
+      alpha: 0.68,
       strokeWidth: 1,
-      strokeAlpha: 0.18,
+      strokeAlpha: 0.08,
       scaleX: 1,
-      scaleY: 1
+      scaleY: 1,
+      blendMode: Phaser.BlendModes.NORMAL
     };
   }
 
@@ -878,7 +1255,8 @@ function getProjectileRenderStyle(projectile: SimulationState["run"]["projectile
         strokeWidth: visual.strokeWidth,
         strokeAlpha: visual.strokeAlpha,
         scaleX: 1,
-        scaleY: 1
+        scaleY: 1.04,
+        blendMode: Phaser.BlendModes.ADD
       };
     case "shard-lance":
       return {
@@ -888,8 +1266,9 @@ function getProjectileRenderStyle(projectile: SimulationState["run"]["projectile
         alpha: 0.98,
         strokeWidth: visual.strokeWidth,
         strokeAlpha: visual.strokeAlpha,
-        scaleX: 1,
-        scaleY: 1
+        scaleX: 1.08,
+        scaleY: 1,
+        blendMode: Phaser.BlendModes.ADD
       };
     case "rift-carbine":
       return {
@@ -899,8 +1278,9 @@ function getProjectileRenderStyle(projectile: SimulationState["run"]["projectile
         alpha: 0.94,
         strokeWidth: visual.strokeWidth,
         strokeAlpha: visual.strokeAlpha,
-        scaleX: 1,
-        scaleY: 1
+        scaleX: 1.06,
+        scaleY: 1,
+        blendMode: Phaser.BlendModes.ADD
       };
     case "nova-driver":
       return {
@@ -910,8 +1290,9 @@ function getProjectileRenderStyle(projectile: SimulationState["run"]["projectile
         alpha: 0.9,
         strokeWidth: visual.strokeWidth,
         strokeAlpha: visual.strokeAlpha,
-        scaleX: 1,
-        scaleY: 1
+        scaleX: 1.04,
+        scaleY: 1.04,
+        blendMode: Phaser.BlendModes.ADD
       };
     case "pulse-blaster":
     default:
@@ -922,8 +1303,9 @@ function getProjectileRenderStyle(projectile: SimulationState["run"]["projectile
         alpha: 0.95,
         strokeWidth: visual.strokeWidth,
         strokeAlpha: visual.strokeAlpha,
-        scaleX: 1,
-        scaleY: 1
+        scaleX: 1.05,
+        scaleY: 1,
+        blendMode: Phaser.BlendModes.ADD
       };
   }
 }

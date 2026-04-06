@@ -1,10 +1,17 @@
-﻿import { enemyDefinitions, getEnemySpawnMix } from "../content/enemies";
-import { upgradeBranchLabels, upgradeDefinitions, upgradePool, upgradeTreeMeta, type UpgradeId } from "../content/upgrades";
+import { enemyDefinitions, getEnemySpawnMix } from "../content/enemies";
+import {
+  upgradeBranchLabels,
+  upgradeDefinitions,
+  upgradePool,
+  upgradeTreeMeta,
+  type UpgradeDefinition,
+  type UpgradeId
+} from "../content/upgrades";
 import type { EnemyType } from "../content/enemies";
-import { weaponDefinitions, type WeaponId } from "../content/weapons";
+import { weaponDefinitions, type WeaponId, type WeaponModId } from "../content/weapons";
 import type { InputSnapshot } from "../input/actions";
-import { add, clamp, distance, fromAngle, normalize, scale, subtract } from "./math";
-import { buyMetaUpgrade, buyPreRunSupply } from "./meta";
+import { add, clamp, distance, distancePointToSegment, fromAngle, normalize, scale, subtract } from "./math";
+import { buyMetaUpgrade, buyPreRunSupply, buyWeaponMod } from "./meta";
 import { randomChoice, randomFloat } from "./random";
 import { createRunState } from "./state";
 import type {
@@ -20,6 +27,7 @@ import type {
   RunTheme,
   ShardState,
   SimulationState,
+  UpgradeOfferSource,
   Vec2
 } from "./types";
 
@@ -32,7 +40,8 @@ export type UiCommand =
   | { type: "enter-meta" }
   | { type: "exit-meta" }
   | { type: "buy-meta"; upgradeId: string }
-  | { type: "buy-supply"; supplyId: "weapon-oil" | "shield-pack" | "field-notes" | "emergency-repair" | "risk-protocol" };
+  | { type: "buy-supply"; supplyId: "weapon-oil" | "shield-pack" | "field-notes" | "emergency-repair" | "risk-protocol" }
+  | { type: "buy-weapon-mod"; weaponId: WeaponId; modId: WeaponModId };
 
 export function updateSimulation(
   previous: SimulationState,
@@ -63,12 +72,23 @@ export function updateSimulation(
   next = spawnEnemies(next, deltaSeconds);
   next = updateEnemies(next, deltaSeconds);
   next = updateProjectiles(next, deltaSeconds);
+  next = maybeOpenBossRewardChest(next);
+  if (next.run.status !== "running") {
+    return next;
+  }
   next = updateShards(next, deltaSeconds);
   next = updateHazards(next, deltaSeconds);
+  next = maybeOpenBossRewardChest(next);
+  if (next.run.status !== "running") {
+    return next;
+  }
   next = maybeUnlockExtraction(next);
   next = updateExtraction(next, deltaSeconds, input);
   next = maybeTriggerBossEvent(next);
   next = maybeOfferLevelUp(next);
+  if (next.run.status !== "running") {
+    return next;
+  }
   next = updateObjective(next, deltaSeconds);
   next = updateTutorialHint(next);
   next = checkDefeat(next);
@@ -169,7 +189,16 @@ function applyCommand(state: SimulationState, command: UiCommand): SimulationSta
       return state;
     case "exit-run":
       if (state.run.status === "paused") {
-        return { ...state, run: { ...state.run, status: "menu" } };
+        return endRun(
+          {
+            ...state,
+            run: {
+              ...state.run,
+              lastDamageSource: "死于自杀"
+            }
+          },
+          "dead"
+        );
       }
       return state;
     case "choose-upgrade":
@@ -185,6 +214,8 @@ function applyCommand(state: SimulationState, command: UiCommand): SimulationSta
       return { ...state, meta: buyMetaUpgrade(state.meta, command.upgradeId) };
     case "buy-supply":
       return { ...state, meta: buyPreRunSupply(state.meta, command.supplyId) };
+    case "buy-weapon-mod":
+      return { ...state, meta: buyWeaponMod(state.meta, command.weaponId, command.modId) };
     default:
       return state;
   }
@@ -193,6 +224,8 @@ function applyCommand(state: SimulationState, command: UiCommand): SimulationSta
 function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationState {
   const player = { ...state.run.player };
   let hazards = [...state.run.hazards];
+  let emergencyRepairCharges = state.run.emergencyRepairCharges;
+  let extraBankedShards = 0;
   const applied = [...state.run.appliedUpgrades, upgradeId];
   const definition = upgradeDefinitions[upgradeId];
   const discoveredUpgradeIds = state.meta.discoveredUpgradeIds.includes(upgradeId)
@@ -212,7 +245,7 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       break;
     case "kinetic-echo":
     case "ghost-shell":
-      player.extraPierce += 1;
+      player.extraPierce += upgradeId === "kinetic-echo" ? 2 : 1;
       if (upgradeId === "ghost-shell") {
         player.explosiveShots += 18;
       }
@@ -240,6 +273,7 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       break;
     case "compound-interest":
       player.economyMultiplier *= 1.18;
+      extraBankedShards += 18;
       break;
     case "pressure-core":
       player.damageMultiplier *= 1.06;
@@ -269,8 +303,14 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       player.shotCount += 1;
       break;
     case "triptych":
-      player.shotCount = Math.max(player.shotCount, 3);
+      // +2 发扇形（基准 1 发时合起来为三联），与「双牙并列」+1 可叠加为四连发。
+      player.shotCount += 2;
       player.fireRateMultiplier *= 0.92;
+      break;
+    case "sidewinder-rack":
+      player.sideShotLevel = Math.max(player.sideShotLevel, 1);
+      player.fireRateMultiplier *= 1.08;
+      player.projectileSpeedMultiplier *= 1.04;
       break;
     case "rear-array":
       player.rearShot = true;
@@ -290,18 +330,53 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       player.projectileSpeedMultiplier *= 0.92;
       player.damageMultiplier *= 1.08;
       break;
+    case "zero-point-lattice":
+      player.damageMultiplier *= 1.35;
+      player.projectileSize *= 1.22;
+      player.projectileSpeedMultiplier *= 1.08;
+      player.extraPierce += 2;
+      player.homingStrength += 0.12;
+      break;
     case "blood-siphon":
-      player.lifeSteal += 0.035;
+      player.lifeSteal += 0.05;
+      break;
+    case "aegis-surge":
+      player.maxShield += 34;
+      player.shield = Math.min(player.maxShield, player.shield + 34);
+      player.maxHp += 24;
+      player.hp += 24;
+      player.damageReduction += 0.08;
+      break;
+    case "phoenix-protocol":
+      player.maxHp += 56;
+      player.hp += 56;
+      player.maxShield += 40;
+      player.shield = Math.min(player.maxShield, player.shield + 40);
+      player.lifeSteal += 0.04;
+      player.damageReduction += 0.1;
+      emergencyRepairCharges += 1;
       break;
     case "bank-heist":
       player.economyMultiplier *= 1.14;
       player.xpMultiplier *= 1.1;
       break;
     case "survey-array":
-      player.visionRadius += 70;
+      player.visionRadius += 95;
       break;
     case "deep-radar":
-      player.visionRadius += 120;
+      player.visionRadius += 155;
+      break;
+    case "vector-plate":
+    case "orbit-plates":
+      break;
+    case "salvo-duel":
+      break;
+    case "supernova-heart":
+      player.shotCount += 2;
+      player.fireRateMultiplier *= 1.15;
+      player.explosiveShots += 26;
+      player.killBurst = true;
+      player.sideShotLevel = Math.max(player.sideShotLevel, 1);
       break;
     default:
       break;
@@ -319,8 +394,14 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       status: "running",
       player,
       hazards,
+      bankedShards: state.run.bankedShards + extraBankedShards,
       appliedUpgrades: applied,
       offeredUpgrades: [],
+      upgradeOfferSource: "level-up",
+      // 首领击杀常伴随经验升级：先弹出普通三选一时不应吞掉仍待领取的首领宝箱奖励。
+      pendingBossReward:
+        state.run.upgradeOfferSource === "level-up" ? state.run.pendingBossReward : null,
+      emergencyRepairCharges,
       tutorialHint: `构筑已接入：${definition.title}。`,
         announcement: createAnnouncement(
           state.nextId,
@@ -358,6 +439,15 @@ function tickPlayer(state: SimulationState, deltaSeconds: number, input: InputSn
   if (input.fire) {
     next = firePlayerWeapon(next, normalize(input.aim));
   }
+
+  const aimLen = Math.hypot(input.aim.x, input.aim.y);
+  if (aimLen > 0.12) {
+    next.run.player.lastAimDirection = scale(input.aim, 1 / aimLen);
+  }
+  if (next.run.appliedUpgrades.includes("orbit-plates")) {
+    next.run.player.barrierOrbitPhase = (next.run.player.barrierOrbitPhase ?? 0) + deltaSeconds * 1.25;
+  }
+
   return next;
 }
 
@@ -491,6 +581,8 @@ function createProjectile(
     obstaclePierceLeft: weapon.obstaclePierce,
     explosiveRadius: player.explosiveShots,
     ricochetLeft: player.ricochetShots,
+    obstacleRicochets: 0,
+    catacombBonusSpent: false,
     homingStrength: player.homingStrength
   };
 }
@@ -636,7 +728,8 @@ function spawnBoss(
 }
 
 function maybeAddHazards(state: SimulationState): SimulationState {
-  const hazardTier = getHazardTier(state);
+  const fractureBonus = state.run.appliedUpgrades.includes("fracture-grid") ? 1 : 0;
+  const hazardTier = getHazardTier(state) + fractureBonus;
   if (hazardTier <= state.run.activeHazardTier || hazardTier === 0) {
     return state;
   }
@@ -760,7 +853,10 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
         obstaclePierceLeft: 0,
         explosiveRadius: 0,
         ricochetLeft: 0,
-        homingStrength: 0
+        obstacleRicochets: 0,
+        catacombBonusSpent: false,
+        homingStrength: 0,
+        damageChannel: "ranged"
       });
       nextId += 1;
       enemyNext.fireCooldown = definition.rangedCooldown ?? 2.4;
@@ -832,7 +928,10 @@ function updateBossSkills(
           obstaclePierceLeft: 0,
           explosiveRadius: 0,
           ricochetLeft: 0,
-          homingStrength: 0
+          obstacleRicochets: 0,
+          catacombBonusSpent: false,
+          homingStrength: 0,
+          damageChannel: "ranged"
         });
         localNextId += 1;
       }
@@ -870,6 +969,155 @@ function updateBossSkills(
   return { nextId: localNextId, screenFlash };
 }
 
+function maybeOfferPendingBossReward(state: SimulationState): SimulationState {
+  const offerSource = state.run.pendingBossReward ?? state.run.bossRewardChest.rewardType;
+  if (state.run.status !== "running" || !offerSource) {
+    return state;
+  }
+
+  let offeredUpgrades = rollUpgrades(state, offerSource);
+  if (offeredUpgrades.length === 0) {
+    offeredUpgrades = rollUpgrades(state, "level-up");
+  }
+  if (offeredUpgrades.length === 0) {
+    return {
+      ...state,
+      run: {
+        ...state.run,
+        pendingBossReward: null
+      }
+    };
+  }
+
+  const legendaryReady = offerSource === "boss-legendary";
+  return {
+    ...state,
+    nextId: state.nextId + 1,
+    run: {
+      ...state.run,
+      status: "level-up",
+      offeredUpgrades,
+      upgradeOfferSource: offerSource,
+      pendingBossReward: null,
+      bossRewardChest: {
+        ...state.run.bossRewardChest,
+        active: false,
+        rewardType: null
+      },
+      tutorialHint: legendaryReady
+        ? "三次首领压制已完成，传说奖励已开启。挑一张真正改变上限的核心。"
+        : "首领核心已崩解，史诗奖励箱已打开。趁热把构筑抬到下一个档位。",
+      announcement: createAnnouncement(
+        state.nextId,
+        legendaryReady ? "传说回响" : "首领宝箱",
+        legendaryReady ? "本次掉落必出传说。选择一张终局级核心。" : "首领已被击破，立即从高阶奖励中挑选一张史诗强化。",
+        legendaryReady ? "boss" : "upgrade",
+        4
+      ),
+      screenFlash: Math.max(state.run.screenFlash, legendaryReady ? 1 : 0.9)
+    }
+  };
+}
+
+function maybeOpenBossRewardChest(state: SimulationState): SimulationState {
+  if (state.run.status !== "running" || !state.run.bossRewardChest.active || !state.run.bossRewardChest.rewardType) {
+    return state;
+  }
+
+  const withinChest = distance(state.run.player.position, state.run.bossRewardChest.position) <= state.run.bossRewardChest.radius;
+  if (!withinChest) {
+    return state;
+  }
+
+  return maybeOfferPendingBossReward({
+    ...state,
+    run: {
+      ...state.run,
+      bossRewardChest: {
+        ...state.run.bossRewardChest,
+        active: false
+      }
+    }
+  });
+}
+
+function isEnemyRangedProjectile(projectile: ProjectileState): boolean {
+  if (projectile.source !== "enemy") {
+    return false;
+  }
+  return (projectile.damageChannel ?? "ranged") === "ranged";
+}
+
+function collectBarrierSegments(state: SimulationState): Array<{ a: Vec2; b: Vec2 }> {
+  const upgrades = state.run.appliedUpgrades;
+  const hasOrbit = upgrades.includes("orbit-plates");
+  const hasAim = upgrades.includes("vector-plate");
+  if (!hasOrbit && !hasAim) {
+    return [];
+  }
+  const pos = state.run.player.position;
+  const p = state.run.player;
+  const dir = normalize(p.lastAimDirection);
+  const segments: Array<{ a: Vec2; b: Vec2 }> = [];
+
+  if (hasOrbit) {
+    const orbitR = 46;
+    const halfW = 28;
+    const phase = p.barrierOrbitPhase ?? 0;
+    for (let i = 0; i < 3; i += 1) {
+      const ang = phase + (i * Math.PI * 2) / 3;
+      const rad = fromAngle(ang);
+      const tan: Vec2 = { x: -rad.y, y: rad.x };
+      const mid = add(pos, scale(rad, orbitR));
+      segments.push({
+        a: add(mid, scale(tan, -halfW)),
+        b: add(mid, scale(tan, halfW))
+      });
+    }
+    return segments;
+  }
+
+  const mid = add(pos, scale(dir, 40));
+  const perp: Vec2 = { x: -dir.y, y: dir.x };
+  const halfW = 32;
+  segments.push({
+    a: add(mid, scale(perp, -halfW)),
+    b: add(mid, scale(perp, halfW))
+  });
+  return segments;
+}
+
+function projectileBlockedByBarriers(position: Vec2, radius: number, state: SimulationState): boolean {
+  const margin = 5;
+  for (const seg of collectBarrierSegments(state)) {
+    if (distancePointToSegment(position, seg.a, seg.b) <= radius + margin) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function advanceProjectileMotion(
+  projectile: ProjectileState,
+  enemies: EnemyState[],
+  deltaSeconds: number
+): ProjectileState | null {
+  const homedVelocity =
+    projectile.source === "player" && projectile.homingStrength > 0
+      ? steerProjectile(projectile, enemies, projectile.homingStrength)
+      : projectile.velocity;
+  const nextProjectile: ProjectileState = {
+    ...projectile,
+    velocity: homedVelocity,
+    life: projectile.life - deltaSeconds,
+    position: add(projectile.position, scale(homedVelocity, deltaSeconds))
+  };
+  if (nextProjectile.life <= 0) {
+    return null;
+  }
+  return nextProjectile;
+}
+
 function updateProjectiles(state: SimulationState, deltaSeconds: number): SimulationState {
   let enemies = [...state.run.enemies];
   let hp = state.run.player.hp;
@@ -890,19 +1138,74 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
   let nextId = state.nextId;
   const remainingProjectiles: ProjectileState[] = [];
 
+  const initialEnemies = state.run.enemies;
+  const enemyProjectileAdvance = new Map<string, ProjectileState>();
   for (const projectile of state.run.projectiles) {
-    const homedVelocity =
-      projectile.source === "player" && projectile.homingStrength > 0
-        ? steerProjectile(projectile, enemies, projectile.homingStrength)
-        : projectile.velocity;
-    const nextProjectile: ProjectileState = {
-      ...projectile,
-      velocity: homedVelocity,
-      life: projectile.life - deltaSeconds,
-      position: add(projectile.position, scale(homedVelocity, deltaSeconds))
-    };
-    if (nextProjectile.life <= 0) {
+    if (projectile.source === "enemy") {
+      const advanced = advanceProjectileMotion(projectile, initialEnemies, deltaSeconds);
+      if (advanced) {
+        enemyProjectileAdvance.set(projectile.id, advanced);
+      }
+    }
+  }
+
+  const cancelledProjectileIds = new Set<string>();
+  let salvoDuelFlash = 0;
+  if (state.run.appliedUpgrades.includes("salvo-duel")) {
+    for (const projectile of state.run.projectiles) {
+      if (projectile.source !== "player") {
+        continue;
+      }
+      const nextPlayer = advanceProjectileMotion(projectile, initialEnemies, deltaSeconds);
+      if (!nextPlayer) {
+        continue;
+      }
+      for (const [enemyProjectileId, nextEnemy] of enemyProjectileAdvance) {
+        if (cancelledProjectileIds.has(enemyProjectileId)) {
+          continue;
+        }
+        if (
+          distance(nextPlayer.position, nextEnemy.position) <=
+          nextPlayer.radius + nextEnemy.radius + 4
+        ) {
+          cancelledProjectileIds.add(projectile.id);
+          cancelledProjectileIds.add(enemyProjectileId);
+          const mid = scale(add(nextPlayer.position, nextEnemy.position), 0.5);
+          pushHitEffect(hitEffects, nextId, {
+            position: mid,
+            color: 0xffe8a8,
+            weaponId: getWeaponIdByColor(nextPlayer.color),
+            kind: "spark",
+            ttl: 0.12
+          });
+          nextId += 1;
+          salvoDuelFlash = Math.max(salvoDuelFlash, 0.14);
+          break;
+        }
+      }
+    }
+  }
+
+  screenFlash = Math.max(screenFlash, salvoDuelFlash);
+
+  for (const projectile of state.run.projectiles) {
+    if (cancelledProjectileIds.has(projectile.id)) {
       continue;
+    }
+
+    let nextProjectile: ProjectileState;
+    if (projectile.source === "enemy") {
+      const advanced = enemyProjectileAdvance.get(projectile.id);
+      if (!advanced) {
+        continue;
+      }
+      nextProjectile = advanced;
+    } else {
+      const advanced = advanceProjectileMotion(projectile, enemies, deltaSeconds);
+      if (!advanced) {
+        continue;
+      }
+      nextProjectile = advanced;
     }
 
     if (projectile.source === "player") {
@@ -918,21 +1221,36 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
           collided = true;
           const hazardAmplifier =
             state.run.appliedUpgrades.includes("fracture-grid") && isEnemyInsideHazard(enemy, state.run.hazards) ? 1.14 : 1;
-          const damage = nextProjectile.damage * hazardAmplifier;
-          const nextEnemy = { ...enemy, hp: enemy.hp - damage };
+          let hitDamage = nextProjectile.damage * hazardAmplifier;
+          if (
+            state.run.appliedUpgrades.includes("catacomb-rounds") &&
+            (nextProjectile.obstacleRicochets ?? 0) > 0 &&
+            !nextProjectile.catacombBonusSpent
+          ) {
+            hitDamage *= 1.22;
+            nextProjectile.catacombBonusSpent = true;
+          }
+          const nextEnemy = { ...enemy, hp: enemy.hp - hitDamage };
           const weaponId = getWeaponIdByColor(nextProjectile.color);
-          healed += damage * state.run.player.lifeSteal;
+          healed += hitDamage * state.run.player.lifeSteal;
           pushHitEffect(hitEffects, nextId, {
             position: { ...nextProjectile.position },
             color: nextProjectile.color,
             weaponId,
-            kind: weaponId === "nova-driver" ? "burst" : weaponId === "shard-lance" ? "pierce-trail" : "spark",
-            ttl: weaponId === "nova-driver" ? 0.24 : weaponId === "shard-lance" ? 0.18 : 0.14
+            kind:
+              nextProjectile.pierceLeft > 0
+                ? "pierce-trail"
+                : weaponId === "nova-driver"
+                  ? "burst"
+                  : weaponId === "shard-lance"
+                    ? "pierce-trail"
+                    : "spark",
+            ttl: nextProjectile.pierceLeft > 0 ? 0.2 : weaponId === "nova-driver" ? 0.24 : weaponId === "shard-lance" ? 0.18 : 0.14
           });
           nextId += 1;
 
           if (nextProjectile.explosiveRadius > 0) {
-            enemies = applyExplosionDamage(enemies, nextProjectile.position, nextProjectile.explosiveRadius, damage * 0.4, enemy.id);
+            enemies = applyExplosionDamage(enemies, nextProjectile.position, nextProjectile.explosiveRadius, hitDamage * 0.4, enemy.id);
             screenFlash = Math.max(screenFlash, 0.36);
             pushHitEffect(hitEffects, nextId, {
               position: { ...nextProjectile.position },
@@ -949,13 +1267,12 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
             const shardBurst = enemy.modifier === "volatile" ? 1.35 : 1;
             shards.push(createShard(nextId, enemy.position, definition.shardDrop * shardBurst, definition.xp));
             if (state.run.player.killBurst) {
-              const burst = createKillBurstProjectiles(nextId + spawnedProjectiles.length, enemy.position, nextProjectile.color, damage * 0.38);
+              const burst = createKillBurstProjectiles(nextId + spawnedProjectiles.length, enemy.position, nextProjectile.color, hitDamage * 0.38);
               spawnedProjectiles.push(...burst);
               nextId += burst.length;
             }
             score += 25 + definition.xp;
             enemiesDestroyed += 1;
-            xp += definition.xp * state.run.player.xpMultiplier;
             screenFlash = Math.max(screenFlash, 0.28);
             nextProjectile.pierceLeft -= 1;
             return [];
@@ -970,6 +1287,16 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
 
       if (healed > 0) {
         hp = Math.min(state.run.player.maxHp, hp + healed);
+        if (healed >= 0.55 && state.run.player.lifeSteal > 0) {
+          pushHitEffect(hitEffects, nextId, {
+            position: { ...state.run.player.position },
+            color: 0x7dffb3,
+            weaponId: getWeaponIdByColor(nextProjectile.color),
+            kind: "heal-glint",
+            ttl: 0.32
+          });
+          nextId += 1;
+        }
       }
 
       const obstacleImpact = resolveProjectileObstacleImpact(nextProjectile, state.run.obstacles);
@@ -979,8 +1306,9 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
         nextProjectile.velocity = obstacleImpact.velocity;
         if (obstacleImpact.response !== "reflect" && nextProjectile.ricochetLeft > 0) {
           nextProjectile.ricochetLeft -= 1;
+          nextProjectile.obstacleRicochets = (nextProjectile.obstacleRicochets ?? 0) + 1;
         }
-        screenFlash = Math.max(screenFlash, obstacleImpact.response === "reflect" ? 0.22 : 0.18);
+        screenFlash = Math.max(screenFlash, obstacleImpact.response === "reflect" ? 0.22 : 0.22);
         pushHitEffect(hitEffects, nextId, {
           position: { ...obstacleImpact.position },
           color: nextProjectile.color,
@@ -1026,6 +1354,19 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
           remainingProjectiles.push(nextProjectile);
           screenFlash = Math.max(screenFlash, 0.14);
         }
+      } else if (
+        isEnemyRangedProjectile(nextProjectile) &&
+        projectileBlockedByBarriers(nextProjectile.position, nextProjectile.radius, state)
+      ) {
+        pushHitEffect(hitEffects, nextId, {
+          position: { ...nextProjectile.position },
+          color: 0x8cf3ff,
+          weaponId: "pulse-blaster",
+          kind: "barrier-block",
+          ttl: 0.16
+        });
+        nextId += 1;
+        screenFlash = Math.max(screenFlash, 0.16);
       } else if (distance(nextProjectile.position, state.run.player.position) <= nextProjectile.radius + state.run.player.radius) {
         const damageResult = applyIncomingDamage(shield, hp, nextProjectile.damage * (1 - clamp(state.run.player.damageReduction, 0, 0.6)));
         if (state.run.player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
@@ -1072,15 +1413,43 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
       return [enemy];
     }
     const definition = enemyDefinitions[enemy.type];
+    const wasBoss = enemy.type === "boss";
     shards.push(createShard(nextId, enemy.position, definition.shardDrop, definition.xp));
     nextId += 1;
     banked += Math.round(definition.shardDrop * 0.15);
     unbanked += definition.shardDrop;
     score += 25 + definition.xp;
     enemiesDestroyed += 1;
-    xp += definition.xp * state.run.player.xpMultiplier;
+    if (wasBoss) {
+      score += 180;
+    }
     return [];
   });
+
+  const defeatedBossCount = state.run.enemies.filter((enemy) => enemy.type === "boss").length - enemies.filter((enemy) => enemy.type === "boss").length;
+  const bossDefeats = state.run.bossDefeats + Math.max(0, defeatedBossCount);
+  const previousLegendaryCharge = state.run.bossLegendaryCharge;
+  const bossLegendaryCharge = defeatedBossCount > 0 ? (previousLegendaryCharge + defeatedBossCount) % 3 : previousLegendaryCharge;
+  const shouldOfferLegendary = defeatedBossCount > 0 && previousLegendaryCharge + defeatedBossCount >= 3;
+  const pendingBossReward =
+    defeatedBossCount > 0 ? (shouldOfferLegendary ? "boss-legendary" : "boss-epic") : state.run.pendingBossReward;
+  const defeatedBoss = state.run.enemies.find((enemy) => enemy.type === "boss" && !enemies.some((nextEnemy) => nextEnemy.id === enemy.id));
+  const bossAnnouncement =
+    defeatedBossCount > 0
+      ? createAnnouncement(
+          nextId,
+          shouldOfferLegendary ? "传说宝箱掉落" : "首领已击破",
+          shouldOfferLegendary ? "第三次首领讨伐完成，传说宝箱已从残骸中析出。" : "首领坠毁，奖励宝箱已掉落到战场。",
+          "boss",
+          4.2
+        )
+      : state.run.announcement;
+  const bossHint =
+    defeatedBossCount > 0
+      ? shouldOfferLegendary
+        ? "你已经连续击破三次首领。靠近掉落的传说宝箱并交互开启。"
+        : `首领已被击破。靠近掉落的史诗宝箱并交互开启；再击破 ${Math.max(0, 3 - bossLegendaryCharge)} 次首领可获得一次传说奖励。`
+      : state.run.tutorialHint;
 
   return {
     ...state,
@@ -1105,15 +1474,32 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
       unbankedShards: unbanked,
       score,
       enemiesDestroyed,
+      bossDefeats,
+      bossLegendaryCharge,
+      pendingBossReward,
+      bossRewardChest:
+        defeatedBossCount > 0 && defeatedBoss
+          ? {
+              active: true,
+              position: { ...defeatedBoss.position },
+              radius: 54,
+              rewardType: pendingBossReward
+            }
+          : state.run.bossRewardChest,
+      announcement: bossAnnouncement,
+      tutorialHint: bossHint,
       screenFlash
     }
   };
 }
 
 function updateShards(state: SimulationState, deltaSeconds: number): SimulationState {
+  // 经验只来自拾取能量碎片（击杀不再直接加经验，见 updateProjectiles 中敌人阵亡处理）。
   let xp = state.run.player.xp;
   let unbanked = state.run.unbankedShards;
   let banked = state.run.bankedShards;
+  let screenFlash = state.run.screenFlash;
+  const salvageNet = state.run.appliedUpgrades.includes("salvage-net");
 
   const shards = state.run.shards.flatMap((shard) => {
     const toPlayer = subtract(state.run.player.position, shard.position);
@@ -1130,6 +1516,9 @@ function updateShards(state: SimulationState, deltaSeconds: number): SimulationS
       xp += shard.xpValue * state.run.player.xpMultiplier;
       unbanked += shard.value;
       banked += Math.round(shard.value * 0.12 * state.run.player.economyMultiplier);
+      if (salvageNet) {
+        screenFlash = Math.max(screenFlash, 0.14);
+      }
       return [];
     }
     return [nextShard];
@@ -1145,7 +1534,8 @@ function updateShards(state: SimulationState, deltaSeconds: number): SimulationS
       },
       shards,
       unbankedShards: unbanked,
-      bankedShards: banked
+      bankedShards: banked,
+      screenFlash
     }
   };
 }
@@ -1290,6 +1680,13 @@ function maybeTriggerBossEvent(state: SimulationState): SimulationState {
   return next;
 }
 
+function isBossRewardOutstanding(run: SimulationState["run"]): boolean {
+  if (run.pendingBossReward != null) {
+    return true;
+  }
+  return run.bossRewardChest.active && run.bossRewardChest.rewardType != null;
+}
+
 function maybeOfferLevelUp(state: SimulationState): SimulationState {
   if (state.run.status !== "running") {
     return state;
@@ -1297,6 +1694,11 @@ function maybeOfferLevelUp(state: SimulationState): SimulationState {
 
   const player = { ...state.run.player };
   if (player.xp < player.xpToNext) {
+    return state;
+  }
+
+  // 首领奖励未结算时不要弹出普通升级，否则同一波会连领两次（先构筑/后宝箱）。
+  if (isBossRewardOutstanding(state.run)) {
     return state;
   }
 
@@ -1313,7 +1715,8 @@ function maybeOfferLevelUp(state: SimulationState): SimulationState {
       ...state.run,
       status: "level-up",
       player,
-      offeredUpgrades: rollUpgrades(state)
+      offeredUpgrades: rollUpgrades(state, "level-up"),
+      upgradeOfferSource: "level-up"
     }
   };
 }
@@ -1368,7 +1771,6 @@ function updateObjective(state: SimulationState, deltaSeconds: number): Simulati
       ...state.run,
       player: {
         ...state.run.player,
-        xp: state.run.player.xp + objective.rewardXp,
         shield: Math.min(state.run.player.maxShield, state.run.player.shield + 14)
       },
       bankedShards: state.run.bankedShards + objective.rewardShards,
@@ -1378,11 +1780,11 @@ function updateObjective(state: SimulationState, deltaSeconds: number): Simulati
         completed: true,
         completionFlash: 2.4
       },
-      tutorialHint: `${objective.title} \u5df2\u5b8c\u6210\uff0c\u83b7\u5f97 ${objective.rewardShards} \u79ef\u5206\u4e0e ${objective.rewardXp} \u7ecf\u9a8c\u3002`,
+      tutorialHint: `${objective.title} 已完成，获得 ${objective.rewardShards} 积分入账。`,
       announcement: createAnnouncement(
         state.nextId,
         "阶段完成",
-        `${objective.title} 达成 · +${objective.rewardShards} 积分 · +${objective.rewardXp} 经验`,
+        `${objective.title} 达成 · +${objective.rewardShards} 积分`,
         "phase"
       ),
       screenFlash: Math.max(state.run.screenFlash, 0.65)
@@ -1506,50 +1908,141 @@ function pushHitEffect(
   }
 }
 
-function rollUpgrades(state: SimulationState): UpgradeId[] {
+type WeightedUpgrade = UpgradeDefinition & { weight: number };
+
+function pickWeightedUpgrade(entries: WeightedUpgrade[], seed: number): { id: UpgradeId; seed: number } {
+  if (entries.length === 0) {
+    throw new Error("pickWeightedUpgrade: empty entries");
+  }
+  const result = randomFloat(seed);
+  const nextSeed = result.seed;
+  const totalWeight = entries.reduce((sum, entry) => sum + entry.weight, 0);
+  if (totalWeight <= 0) {
+    return { id: entries[0].id, seed: nextSeed };
+  }
+  let cursor = result.value * totalWeight;
+  let chosenIndex = 0;
+  for (let i = 0; i < entries.length; i += 1) {
+    cursor -= entries[i].weight;
+    if (cursor <= 0) {
+      chosenIndex = i;
+      break;
+    }
+  }
+  return { id: entries[chosenIndex].id, seed: nextSeed };
+}
+
+function removeUpgradeById(available: WeightedUpgrade[], id: UpgradeId): void {
+  const index = available.findIndex((entry) => entry.id === id);
+  if (index >= 0) {
+    available.splice(index, 1);
+  }
+}
+
+function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): UpgradeId[] {
   let seed = state.rngSeed;
-  const available = upgradePool.filter((upgrade) => {
-    if (upgrade.once && state.run.appliedUpgrades.includes(upgrade.id)) {
-      return false;
+
+  const buildPool = (relaxEpicParents: boolean): WeightedUpgrade[] =>
+    upgradePool
+      .filter((upgrade) => {
+        if (upgrade.once && state.run.appliedUpgrades.includes(upgrade.id)) {
+          return false;
+        }
+        if (upgrade.id === "compound-interest" && !state.meta.unlockedUpgradeIds.includes("compound-interest")) {
+          return false;
+        }
+        if (upgrade.id === "fracture-grid" && state.run.hazards.length === 0) {
+          return false;
+        }
+        const meta = upgradeTreeMeta[upgrade.id];
+        if (meta.parents && !meta.parents.every((parentId) => state.run.appliedUpgrades.includes(parentId))) {
+          if (!relaxEpicParents || (upgrade.rarity !== "epic" && upgrade.rarity !== "legendary")) {
+            return false;
+          }
+        }
+        if (source === "boss-epic" && upgrade.rarity === "common") {
+          return false;
+        }
+        if (source === "boss-legendary" && !["legendary", "epic"].includes(upgrade.rarity)) {
+          return false;
+        }
+        if (source === "level-up" && upgrade.rarity === "legendary") {
+          return false;
+        }
+        return true;
+      })
+      .map((upgrade) => {
+        const meta = upgradeTreeMeta[upgrade.id];
+        const sameBranchCount = state.run.appliedUpgrades.filter((upgradeId) => upgradeTreeMeta[upgradeId]?.branch === meta.branch).length;
+        const branchBias = sameBranchCount > 0 ? 1 + sameBranchCount * 0.28 : 1;
+        const stageBias = state.run.objective.stage >= meta.tier * 2 ? 1.12 : 0.88;
+        const rarityBias =
+          source === "level-up"
+            ? upgrade.rarity === "epic"
+              ? 1.28
+              : upgrade.rarity === "rare"
+                ? 1.16
+                : 0.94
+            : source === "boss-epic"
+              ? upgrade.rarity === "epic"
+                ? 1.95
+                : upgrade.rarity === "legendary"
+                  ? 1.72
+                  : 1.08
+              : upgrade.rarity === "legendary"
+                ? 3.8
+                : 0.42;
+        const bossDefeatBias = source === "level-up" ? 1 + Math.min(0.24, state.run.bossDefeats * 0.06) : 1;
+        return {
+          ...upgrade,
+          weight: upgrade.weight * branchBias * stageBias * rarityBias * bossDefeatBias
+        };
+      });
+
+  let available = buildPool(false);
+
+  if (source === "boss-epic" || source === "boss-legendary") {
+    if (available.length === 0) {
+      available = buildPool(true);
     }
-    if (upgrade.id === "compound-interest" && !state.meta.unlockedUpgradeIds.includes("compound-interest")) {
-      return false;
+  }
+
+  if (source === "boss-epic") {
+    const hasEpicPlus = available.some((u) => u.rarity === "epic" || u.rarity === "legendary");
+    if (!hasEpicPlus) {
+      available = buildPool(true);
     }
-    if (upgrade.id === "fracture-grid" && state.run.hazards.length === 0) {
-      return false;
-    }
-    const meta = upgradeTreeMeta[upgrade.id];
-    if (meta.parents && !meta.parents.every((parentId) => state.run.appliedUpgrades.includes(parentId))) {
-      return false;
-    }
-    return true;
-  }).map((upgrade) => {
-    const meta = upgradeTreeMeta[upgrade.id];
-    const sameBranchCount = state.run.appliedUpgrades.filter((upgradeId) => upgradeTreeMeta[upgradeId]?.branch === meta.branch).length;
-    const branchBias = sameBranchCount > 0 ? 1 + sameBranchCount * 0.28 : 1;
-    const stageBias = state.run.objective.stage >= meta.tier * 2 ? 1.08 : 0.92;
-    return {
-      ...upgrade,
-      weight: upgrade.weight * branchBias * stageBias
-    };
-  });
+  }
 
   const selections: UpgradeId[] = [];
-  while (selections.length < 3 && available.length > 0) {
-    const result = randomFloat(seed);
-    seed = result.seed;
-    const totalWeight = available.reduce((sum, entry) => sum + entry.weight, 0);
-    let cursor = result.value * totalWeight;
-    let chosenIndex = 0;
-    for (let i = 0; i < available.length; i += 1) {
-      cursor -= available[i].weight;
-      if (cursor <= 0) {
-        chosenIndex = i;
-        break;
-      }
+
+  if (source === "boss-epic") {
+    const epicPlus = available.filter((u) => u.rarity === "epic" || u.rarity === "legendary");
+    if (epicPlus.length > 0) {
+      const pick = pickWeightedUpgrade(epicPlus, seed);
+      seed = pick.seed;
+      selections.push(pick.id);
+      removeUpgradeById(available, pick.id);
     }
-    selections.push(available[chosenIndex].id);
-    available.splice(chosenIndex, 1);
+  }
+
+  if (source === "boss-legendary") {
+    const legendaries = available.filter((u) => u.rarity === "legendary");
+    const epics = available.filter((u) => u.rarity === "epic");
+    const priorityPool = legendaries.length > 0 ? legendaries : epics;
+    if (priorityPool.length > 0) {
+      const pick = pickWeightedUpgrade(priorityPool, seed);
+      seed = pick.seed;
+      selections.push(pick.id);
+      removeUpgradeById(available, pick.id);
+    }
+  }
+
+  while (selections.length < 3 && available.length > 0) {
+    const pick = pickWeightedUpgrade(available, seed);
+    seed = pick.seed;
+    selections.push(pick.id);
+    removeUpgradeById(available, pick.id);
   }
 
   return selections;
@@ -1558,6 +2051,50 @@ function rollUpgrades(state: SimulationState): UpgradeId[] {
 function updateTutorialHint(state: SimulationState): SimulationState {
   if (state.run.objective.completed && state.run.objective.completionFlash > 0) {
     return state;
+  }
+
+  const xpCappedForLevel = state.run.player.xp >= state.run.player.xpToNext;
+
+  // 首领奖励未结算但经验已满：强提示先结算，否则无法弹出升级（可能卡阶段）
+  if (isBossRewardOutstanding(state.run) && xpCappedForLevel && !state.run.bossRewardChest.active && state.run.pendingBossReward != null) {
+    return {
+      ...state,
+      run: {
+        ...state.run,
+        tutorialHint:
+          "【优先】经验已满，但首领奖励仍未结算。请回到首领被击败的位置附近寻找发光宝箱；靠近后会自动开启，之后才能升级。"
+      }
+    };
+  }
+
+  if (state.run.bossRewardChest.active) {
+    const withinChest =
+      distance(state.run.player.position, state.run.bossRewardChest.position) <= state.run.bossRewardChest.radius;
+    let tutorialHint: string;
+    if (xpCappedForLevel) {
+      if (withinChest) {
+        tutorialHint = "正在开启首领宝箱… 领取后即可解锁升级并继续推进阶段。";
+      } else {
+        tutorialHint =
+          state.run.bossRewardChest.rewardType === "boss-legendary"
+            ? "【优先】经验已满，但必须先领取传说首领宝箱才能升级。请尽快靠近发光宝箱直至自动开启。"
+            : "【优先】经验已满，但必须先领取首领宝箱才能升级。请尽快靠近战场上的宝箱直至自动开启。";
+      }
+    } else if (withinChest) {
+      tutorialHint = "已进入首领奖励箱范围，正在开启强化。";
+    } else {
+      tutorialHint =
+        state.run.bossRewardChest.rewardType === "boss-legendary"
+          ? "传说宝箱已掉落。靠近后会自动开启，选择一张终局级强化。"
+          : "首领奖励箱已掉落。靠近后会自动开启，领取本次高阶强化。";
+    }
+    return {
+      ...state,
+      run: {
+        ...state.run,
+        tutorialHint
+      }
+    };
   }
 
   if (!state.run.extraction.unlocked) {
@@ -1812,6 +2349,8 @@ function createKillBurstProjectiles(nextId: number, position: Vec2, color: numbe
       obstaclePierceLeft: 0,
       explosiveRadius: 0,
       ricochetLeft: 0,
+      obstacleRicochets: 0,
+      catacombBonusSpent: false,
       homingStrength: 0
     });
   }

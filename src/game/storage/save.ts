@@ -63,6 +63,7 @@ export function loadState(): SimulationState {
       meta: {
         ...mergedMeta,
         unlockedWeapons,
+        purchasedWeaponModIds: Array.isArray(mergedMeta.purchasedWeaponModIds) ? [...new Set(mergedMeta.purchasedWeaponModIds)] : [],
         discoveredUpgradeIds: Array.isArray(mergedMeta.discoveredUpgradeIds) ? [...new Set(mergedMeta.discoveredUpgradeIds)] : [],
         skillFeedbackClientId:
           typeof mergedMeta.skillFeedbackClientId === "string" && mergedMeta.skillFeedbackClientId
@@ -86,4 +87,8 @@ export function persistState(state: SimulationState): void {
     meta: state.meta
   };
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(saveData));
+}
+
+export function clearPersistedState(): void {
+  window.localStorage.removeItem(STORAGE_KEY);
 }

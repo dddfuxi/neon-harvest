@@ -1,3 +1,4 @@
+import { weaponModDefinitions, weaponModTreeByWeapon, type WeaponId, type WeaponModId } from "../content/weapons";
 import type { MetaProgressState, MetaUpgrade, PreRunSupply, PreRunSupplyId } from "./types";
 
 export const metaUpgrades: MetaUpgrade[] = [
@@ -26,6 +27,7 @@ export const defaultMetaState: MetaProgressState = {
   unlockedWeapons: ["pulse-blaster", "arc-caster", "rift-carbine"],
   dashVariantUnlocked: false,
   unlockedUpgradeIds: [],
+  purchasedWeaponModIds: [],
   discoveredUpgradeIds: [],
   skillFeedbackClientId: "",
   skillFeedback: {},
@@ -129,5 +131,35 @@ export function buyPreRunSupply(meta: MetaProgressState, supplyId: PreRunSupplyI
       ...meta.supplyInventory,
       [supplyId]: currentStock + 1
     }
+  };
+}
+
+export function buyWeaponMod(meta: MetaProgressState, weaponId: WeaponId, modId: WeaponModId): MetaProgressState {
+  if (meta.purchasedWeaponModIds.includes(modId)) {
+    return meta;
+  }
+
+  if (!meta.unlockedWeapons.includes(weaponId)) {
+    return meta;
+  }
+
+  const mod = weaponModDefinitions[modId];
+  if (!mod || mod.weaponId !== weaponId || meta.credits < mod.cost) {
+    return meta;
+  }
+
+  const weaponTreeIds = new Set(weaponModTreeByWeapon[weaponId].map((entry) => entry.id));
+  if (!weaponTreeIds.has(modId)) {
+    return meta;
+  }
+
+  if (mod.parents && !mod.parents.every((parentId) => meta.purchasedWeaponModIds.includes(parentId))) {
+    return meta;
+  }
+
+  return {
+    ...meta,
+    credits: meta.credits - mod.cost,
+    purchasedWeaponModIds: [...meta.purchasedWeaponModIds, modId]
   };
 }

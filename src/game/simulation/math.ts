@@ -33,6 +33,20 @@ export function distance(a: Vec2, b: Vec2): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+/** 点与线段的最短距离（用于屏障与弹体相交判定） */
+export function distancePointToSegment(point: Vec2, segmentA: Vec2, segmentB: Vec2): number {
+  const ab = subtract(segmentB, segmentA);
+  const ap = subtract(point, segmentA);
+  const abLenSq = ab.x * ab.x + ab.y * ab.y;
+  if (abLenSq < 1e-8) {
+    return distance(point, segmentA);
+  }
+  let t = (ap.x * ab.x + ap.y * ab.y) / abLenSq;
+  t = Math.max(0, Math.min(1, t));
+  const proj = add(segmentA, scale(ab, t));
+  return distance(point, proj);
+}
+
 export function fromAngle(angle: number): Vec2 {
   return { x: Math.cos(angle), y: Math.sin(angle) };
 }

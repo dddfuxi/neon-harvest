@@ -1,5 +1,6 @@
-﻿import { defaultMetaState } from "./meta";
+import { defaultMetaState } from "./meta";
 import { characterSkillPool } from "../content/skills";
+import { weaponModDefinitions } from "../content/weapons";
 import { distance } from "./math";
 import { randomChoice, randomFloat } from "./random";
 import type { PlayerState, RunObjectiveState, RunTheme, SimulationState } from "./types";
@@ -46,10 +47,12 @@ function createPlayerState(
     homingStrength: 0,
     lifeSteal: 0,
     killBurst: false,
-    visionRadius: 360,
+    visionRadius: 300,
     characterSkillId,
     skillCooldown: 0,
-    skillEffectTimer: 0
+    skillEffectTimer: 0,
+    lastAimDirection: { x: 1, y: 0 },
+    barrierOrbitPhase: 0
   };
 }
 
@@ -135,6 +138,41 @@ function createRunObjective(
   };
 }
 
+function applyWeaponArmoryMods(player: PlayerState, purchasedModIds: string[], weaponId: PlayerState["weaponId"]): PlayerState {
+  const nextPlayer = { ...player };
+  for (const modId of purchasedModIds) {
+    const mod = weaponModDefinitions[modId as keyof typeof weaponModDefinitions];
+    if (!mod || mod.weaponId !== weaponId) {
+      continue;
+    }
+    if (mod.effects.damageMultiplier) {
+      nextPlayer.damageMultiplier *= mod.effects.damageMultiplier;
+    }
+    if (mod.effects.fireRateMultiplier) {
+      nextPlayer.fireRateMultiplier *= mod.effects.fireRateMultiplier;
+    }
+    if (mod.effects.projectileSpeedMultiplier) {
+      nextPlayer.projectileSpeedMultiplier *= mod.effects.projectileSpeedMultiplier;
+    }
+    if (mod.effects.extraPierce) {
+      nextPlayer.extraPierce += mod.effects.extraPierce;
+    }
+    if (mod.effects.extraShots) {
+      nextPlayer.shotCount += mod.effects.extraShots;
+    }
+    if (mod.effects.projectileSizeMultiplier) {
+      nextPlayer.projectileSize *= mod.effects.projectileSizeMultiplier;
+    }
+    if (mod.effects.explosiveShots) {
+      nextPlayer.explosiveShots += mod.effects.explosiveShots;
+    }
+    if (mod.effects.homingStrength) {
+      nextPlayer.homingStrength += mod.effects.homingStrength;
+    }
+  }
+  return nextPlayer;
+}
+
 export function createInitialState(): SimulationState {
   return {
     world: { chunkSize: 480, seed: 1337 },
@@ -163,15 +201,25 @@ export function createInitialState(): SimulationState {
         holdDuration: 4,
         rewardMultiplier: 1
       },
+      bossRewardChest: {
+        active: false,
+        position: { x: 0, y: 0 },
+        radius: 48,
+        rewardType: null
+      },
       score: 0,
       bankedShards: 0,
       unbankedShards: 0,
       enemiesDestroyed: 0,
       offeredUpgrades: [],
+      upgradeOfferSource: "level-up",
       appliedUpgrades: [],
       activeHazardTier: 0,
       bossEventTriggered: false,
       bossSpawnCount: 0,
+      bossDefeats: 0,
+      bossLegendaryCharge: 0,
+      pendingBossReward: null,
       bossAlertTimer: 0,
       emergencyRepairCharges: 0,
       riskProtocolTier: 0,
@@ -189,7 +237,11 @@ export function createInitialState(): SimulationState {
 export function createRunState(previous: SimulationState, weaponId?: PlayerState["weaponId"]): SimulationState {
   const chosenWeapon = weaponId ?? previous.meta.unlockedWeapons[0] ?? "pulse-blaster";
   const skillRoll = randomChoice(previous.rngSeed, characterSkillPool);
-  const basePlayer = createPlayerState(chosenWeapon, previous.meta.dashVariantUnlocked, skillRoll.value);
+  const basePlayer = applyWeaponArmoryMods(
+    createPlayerState(chosenWeapon, previous.meta.dashVariantUnlocked, skillRoll.value),
+    previous.meta.purchasedWeaponModIds,
+    chosenWeapon
+  );
   const obstacleResult = generateObstacles(previous.world.seed, previous.world.chunkSize, basePlayer.position);
   const supplyInventory = { ...previous.meta.supplyInventory };
   const activatedSupplies: string[] = [];
@@ -259,15 +311,25 @@ export function createRunState(previous: SimulationState, weaponId?: PlayerState
         holdDuration: 4,
         rewardMultiplier: 1
       },
+      bossRewardChest: {
+        active: false,
+        position: { x: 0, y: 0 },
+        radius: 48,
+        rewardType: null
+      },
       score: 0,
       bankedShards: 0,
       unbankedShards: 0,
       enemiesDestroyed: 0,
       offeredUpgrades: [],
+      upgradeOfferSource: "level-up",
       appliedUpgrades: [],
       activeHazardTier: 0,
       bossEventTriggered: false,
       bossSpawnCount: 0,
+      bossDefeats: 0,
+      bossLegendaryCharge: 0,
+      pendingBossReward: null,
       bossAlertTimer: 0,
       emergencyRepairCharges,
       riskProtocolTier,

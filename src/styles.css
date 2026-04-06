@@ -13,6 +13,7 @@
   --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
   --rare: #57c7ff;
   --epic: #ff8bd8;
+  --legendary: #ffc46b;
   font-family: "Trebuchet MS", "Segoe UI", sans-serif;
 }
 
@@ -290,6 +291,41 @@ body {
   color: var(--cyan);
 }
 
+.economy-hud-strip {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(108, 243, 255, 0.12);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+.economy-hud-strip .label {
+  flex-shrink: 0;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(180, 210, 230, 0.85);
+}
+
+.economy-hud-strip .body-copy {
+  flex: 1 1 200px;
+  min-width: 0;
+  color: rgba(220, 235, 248, 0.92);
+}
+
+.mobile-hud .economy-hud-strip {
+  grid-column: 1 / -1;
+  margin-top: 0;
+  padding-top: 6px;
+  border-top: none;
+  font-size: 10px;
+}
+
 .progress {
   margin-top: 8px;
   width: 100%;
@@ -331,6 +367,114 @@ body {
   pointer-events: auto;
 }
 
+.legendary-reward-panel {
+  position: relative;
+  border-color: rgba(255, 196, 107, 0.66);
+  box-shadow:
+    0 0 0 1px rgba(255, 196, 107, 0.14),
+    0 28px 60px rgba(0, 0, 0, 0.5),
+    0 0 48px rgba(255, 196, 107, 0.18);
+  background:
+    radial-gradient(circle at top, rgba(255, 196, 107, 0.14), transparent 36%),
+    linear-gradient(180deg, rgba(22, 14, 8, 0.96), rgba(7, 10, 19, 0.94));
+}
+
+.legendary-reward-panel::before,
+.legendary-reward-panel::after {
+  content: "";
+  position: absolute;
+  inset: 10px;
+  border-radius: 20px;
+  pointer-events: none;
+}
+
+.legendary-reward-panel::before {
+  border: 1px solid rgba(255, 196, 107, 0.56);
+  opacity: 0.75;
+  animation: legendary-panel-pulse 1.9s ease-in-out infinite;
+}
+
+.legendary-reward-panel::after {
+  inset: 18px;
+  border: 1px solid rgba(255, 240, 179, 0.22);
+  opacity: 0.55;
+}
+
+.legendary-core-reveal {
+  display: grid;
+  place-items: center;
+  gap: 14px;
+  min-height: 360px;
+  width: min(520px, 100%);
+  margin: 8px auto 0;
+  padding: 24px;
+  border: 1px solid rgba(255, 196, 107, 0.48);
+  border-radius: 28px;
+  background:
+    radial-gradient(circle at center, rgba(255, 196, 107, 0.12), transparent 50%),
+    linear-gradient(180deg, rgba(30, 19, 10, 0.94), rgba(12, 10, 15, 0.92));
+  color: var(--text);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.legendary-core-reveal strong {
+  font-size: 24px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #fff1cf;
+}
+
+.legendary-core-reveal span {
+  color: rgba(255, 240, 179, 0.82);
+  font-size: 13px;
+}
+
+.legendary-core-shell {
+  position: relative;
+  width: 180px;
+  height: 180px;
+  display: grid;
+  place-items: center;
+}
+
+.legendary-core-heart,
+.legendary-core-glow,
+.legendary-core-orbit {
+  position: absolute;
+  border-radius: 999px;
+}
+
+.legendary-core-heart {
+  width: 86px;
+  height: 86px;
+  background: radial-gradient(circle at 35% 35%, #fff6cf, #ffc46b 58%, #ff8b4a 100%);
+  box-shadow: 0 0 34px rgba(255, 196, 107, 0.4);
+  animation: legendary-core-heart 1.45s ease-in-out infinite;
+}
+
+.legendary-core-glow {
+  width: 132px;
+  height: 132px;
+  border: 2px solid rgba(255, 196, 107, 0.42);
+  animation: pulse-ring 1.6s ease-out infinite;
+}
+
+.legendary-core-orbit {
+  inset: 10px;
+  border: 2px solid rgba(255, 240, 179, 0.18);
+}
+
+.legendary-core-orbit.orbit-a {
+  animation: legendary-core-spin 2.8s linear infinite;
+}
+
+.legendary-core-orbit.orbit-b {
+  inset: 24px;
+  border-color: rgba(255, 196, 107, 0.26);
+  animation: legendary-core-spin-reverse 2s linear infinite;
+}
+
 .menu-shell {
   width: min(1160px, 100%);
   max-height: calc(100% - 8px);
@@ -359,6 +503,7 @@ body {
 
 .menu-grid.lower {
   margin-top: 18px;
+  align-items: start;
 }
 
 .hero-copy,
@@ -461,6 +606,54 @@ body {
   color: var(--muted);
 }
 
+.current-weapon-section {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.armory-inline-section {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.compact-supply-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.compact-supply-card {
+  padding: 12px;
+  border-radius: 16px;
+}
+
+.compact-supply-card h3 {
+  margin-bottom: 8px;
+  font-size: 15px;
+}
+
+.compact-supply-card p {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.compact-supply-card footer {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.compact-button-row {
+  grid-template-columns: 1fr;
+  margin-top: 12px;
+}
+
+.compact-button-row .button {
+  min-height: 38px;
+  padding: 10px 12px;
+}
+
 .weapon-grid,
 .card-grid,
 .upgrade-grid,
@@ -491,6 +684,84 @@ body {
   display: grid;
   gap: 14px;
   margin-top: 14px;
+}
+
+.armory-section {
+  margin-top: 18px;
+}
+
+.armory-tree-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.armory-node {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(108, 243, 255, 0.14);
+  background:
+    linear-gradient(180deg, rgba(9, 20, 38, 0.86), rgba(7, 14, 28, 0.82)),
+    radial-gradient(circle at top, rgba(108, 243, 255, 0.08), transparent 44%);
+  overflow: hidden;
+}
+
+.armory-node::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  right: -12px;
+  top: 34px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(108, 243, 255, 0.26), transparent);
+  opacity: 0.65;
+}
+
+.armory-node.available {
+  border-color: rgba(108, 243, 255, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(108, 243, 255, 0.08);
+}
+
+.armory-node.purchased {
+  border-color: rgba(212, 255, 99, 0.34);
+  box-shadow: 0 0 0 1px rgba(212, 255, 99, 0.08), inset 0 0 0 1px rgba(212, 255, 99, 0.08);
+}
+
+.armory-node.locked {
+  opacity: 0.68;
+  filter: saturate(0.58);
+}
+
+.armory-node-tier {
+  width: fit-content;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(108, 243, 255, 0.12);
+  color: var(--cyan);
+}
+
+.armory-node h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.armory-node p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.armory-node footer {
+  color: var(--amber);
+  font-weight: 700;
 }
 
 .skill-tree-grid {
@@ -947,6 +1218,35 @@ body {
   box-shadow: inset 0 0 0 1px rgba(255, 139, 216, 0.14);
 }
 
+.choice-card.rarity-legendary {
+  border-color: rgba(255, 196, 107, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(255, 196, 107, 0.2), 0 0 28px rgba(255, 196, 107, 0.16);
+  background: linear-gradient(180deg, rgba(42, 24, 10, 0.92), rgba(17, 11, 8, 0.9));
+}
+
+.legendary-reward-grid .choice-card {
+  opacity: 0;
+  transform: translateY(34px) scale(0.94);
+  animation: legendary-card-entry 520ms cubic-bezier(0.2, 0.82, 0.22, 1) forwards;
+  animation-delay: var(--entry-delay, 0ms);
+}
+
+.legendary-reward-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.legendary-reward-card::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: linear-gradient(120deg, rgba(255, 196, 107, 0), rgba(255, 240, 179, 0.2), rgba(255, 196, 107, 0));
+  transform: translateX(-115%);
+  animation: legendary-card-sheen 2.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
 .rarity-pill {
   background: rgba(108, 243, 255, 0.12);
 }
@@ -959,6 +1259,11 @@ body {
 .rarity-epic .rarity-pill {
   background: rgba(255, 139, 216, 0.18);
   color: var(--epic);
+}
+
+.rarity-legendary .rarity-pill {
+  background: rgba(255, 196, 107, 0.22);
+  color: var(--legendary);
 }
 
 .rarity-type {
@@ -1133,6 +1438,64 @@ body {
 @keyframes enemy-float {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-8px); }
+}
+
+@keyframes legendary-panel-pulse {
+  0%, 100% {
+    opacity: 0.35;
+    box-shadow: 0 0 0 0 rgba(255, 196, 107, 0.18);
+  }
+  50% {
+    opacity: 0.88;
+    box-shadow: 0 0 0 10px rgba(255, 196, 107, 0.04);
+  }
+}
+
+@keyframes legendary-card-entry {
+  0% {
+    opacity: 0;
+    transform: translateY(34px) scale(0.94);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-4px) scale(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes legendary-card-sheen {
+  0%, 60%, 100% {
+    transform: translateX(-115%);
+    opacity: 0;
+  }
+  20% {
+    transform: translateX(118%);
+    opacity: 1;
+  }
+}
+
+@keyframes legendary-core-heart {
+  0%, 100% {
+    transform: scale(0.96);
+    filter: saturate(1);
+  }
+  50% {
+    transform: scale(1.08);
+    filter: saturate(1.18);
+  }
+}
+
+@keyframes legendary-core-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes legendary-core-spin-reverse {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
 }
 
 @media (max-width: 980px) {

@@ -1,7 +1,7 @@
 import type { EliteModifier, EnemyType } from "../content/enemies";
 import type { CharacterSkillId } from "../content/skills";
 import type { UpgradeId } from "../content/upgrades";
-import type { WeaponId } from "../content/weapons";
+import type { WeaponId, WeaponModId } from "../content/weapons";
 
 export type Vec2 = {
   x: number;
@@ -49,6 +49,10 @@ export type PlayerState = {
   characterSkillId: CharacterSkillId;
   skillCooldown: number;
   skillEffectTimer: number;
+  /** 最后一次非零瞄准方向（用于向矢偏转板等） */
+  lastAimDirection: Vec2;
+  /** 环轨盾阵公转角速度积分（弧度） */
+  barrierOrbitPhase: number;
 };
 
 export type BossPattern = "artillery" | "charger";
@@ -85,7 +89,13 @@ export type ProjectileState = {
   obstaclePierceLeft: number;
   explosiveRadius: number;
   ricochetLeft: number;
+  /** 已完成的障碍弹射次数（用于地穴弹壳首跳增伤） */
+  obstacleRicochets?: number;
+  /** 地穴弹壳：弹射后首次命中敌人是否已消耗加成 */
+  catacombBonusSpent?: boolean;
   homingStrength: number;
+  /** 敌方弹体：远程可被屏障拦截；近战弹体不可 */
+  damageChannel?: "ranged" | "melee";
 };
 
 export type ShardState = {
@@ -113,7 +123,7 @@ export type HitEffectState = {
   position: Vec2;
   color: number;
   weaponId: WeaponId;
-  kind: "spark" | "burst" | "pierce-trail" | "ricochet-flash";
+  kind: "spark" | "burst" | "pierce-trail" | "ricochet-flash" | "heal-glint" | "barrier-block";
   ttl: number;
 };
 
@@ -125,6 +135,8 @@ export type RunAnnouncement = {
   timer: number;
   duration: number;
 };
+
+export type UpgradeOfferSource = "level-up" | "boss-epic" | "boss-legendary";
 
 export type ObstacleState = {
   id: string;
@@ -144,6 +156,13 @@ export type ExtractionState = {
   holdTimer: number;
   holdDuration: number;
   rewardMultiplier: number;
+};
+
+export type BossRewardChestState = {
+  active: boolean;
+  position: Vec2;
+  radius: number;
+  rewardType: Exclude<UpgradeOfferSource, "level-up"> | null;
 };
 
 export type RunObjectiveKind = "collect-shards" | "defeat-enemies" | "survive";
@@ -237,6 +256,7 @@ export type MetaProgressState = {
   unlockedWeapons: WeaponId[];
   dashVariantUnlocked: boolean;
   unlockedUpgradeIds: UpgradeId[];
+  purchasedWeaponModIds: WeaponModId[];
   discoveredUpgradeIds: UpgradeId[];
   skillFeedbackClientId: string;
   skillFeedback: Partial<Record<UpgradeId, SkillFeedbackEntry>>;
@@ -263,15 +283,20 @@ export type RunState = {
   objective: RunObjectiveState;
   stageTheme: RunTheme;
   extraction: ExtractionState;
+  bossRewardChest: BossRewardChestState;
   score: number;
   bankedShards: number;
   unbankedShards: number;
   enemiesDestroyed: number;
   offeredUpgrades: UpgradeId[];
+  upgradeOfferSource: UpgradeOfferSource;
   appliedUpgrades: UpgradeId[];
   activeHazardTier: number;
   bossEventTriggered: boolean;
   bossSpawnCount: number;
+  bossDefeats: number;
+  bossLegendaryCharge: number;
+  pendingBossReward: Exclude<UpgradeOfferSource, "level-up"> | null;
   bossAlertTimer: number;
   emergencyRepairCharges: number;
   riskProtocolTier: number;
