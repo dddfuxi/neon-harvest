@@ -1,5 +1,6 @@
 import "./styles.css";
 import { inject } from "@vercel/analytics";
+import { injectSpeedInsights } from "@vercel/speed-insights";
 
 import { createAppShell } from "./ui/appShell";
 
@@ -25,4 +26,5 @@ window.visualViewport?.addEventListener("resize", onVisualViewportChange);
 window.visualViewport?.addEventListener("scroll", onVisualViewportChange);
 
 inject();
+injectSpeedInsights();
 createAppShell(document.getElementById("app")!);
