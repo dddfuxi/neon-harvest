@@ -1,6 +1,6 @@
 import Phaser from "phaser";
 
-import { getBarrierOrbitSegmentCount } from "../../game/content/upgrades";
+import { getBarrierOrbitSegmentCount, getBranchVisual } from "../../game/content/upgrades";
 import { weaponDefinitions } from "../../game/content/weapons";
 import { getAimReticleWorldPosition, InputController } from "../../game/input/bindings";
 import { createEmptyInput } from "../../game/input/actions";
@@ -189,12 +189,13 @@ export class GameScene extends Phaser.Scene {
     playerSprite.setRotation(Math.atan2(facing.y, facing.x));
     playerSprite.setScale(1 + state.run.screenFlash * 0.05);
     const weaponTint = weaponDefinitions[state.run.player.weaponId].color;
+    const buildTint = state.run.dominantBranch ? getBranchVisual(state.run.dominantBranch).color : weaponTint;
     playerSprite.setTexture(getPlayerTextureKey(state.run.player.weaponId));
     const shieldRatio = Math.max(0, state.run.player.shield / state.run.player.maxShield);
     playerShield.setPosition(state.run.player.position.x, state.run.player.position.y);
     playerShield.setRadius(20 + shieldRatio * 10 + Math.sin(this.time.now / 90) * 1.5);
-    playerShield.setStrokeStyle(2 + shieldRatio * 2, weaponTint, 0.3 + shieldRatio * 0.55);
-    playerShield.setFillStyle(weaponTint, 0.03 + shieldRatio * 0.08);
+    playerShield.setStrokeStyle(2 + shieldRatio * 2, buildTint, 0.3 + shieldRatio * 0.55);
+    playerShield.setFillStyle(buildTint, 0.03 + shieldRatio * 0.08);
     playerShield.setVisible(shieldRatio > 0.02);
 
     const aimG = this.registryView.aimReticle;
@@ -367,6 +368,11 @@ export class GameScene extends Phaser.Scene {
         update: (view) => {
           const visibility = getVisionVisibility(obstacle.position.x, obstacle.position.y, state);
           view.setPosition(obstacle.position.x, obstacle.position.y);
+          if (obstacle.kind === "rift-wall" && view instanceof Phaser.GameObjects.Arc) {
+            view.setRadius(obstacle.radius);
+            view.setFillStyle(obstacle.color, 0.2 + Math.min(0.28, (obstacle.ttl ?? 0) * 0.06));
+            view.setStrokeStyle(3, 0xf2e7ff, Math.min(0.85, 0.25 + (obstacle.ttl ?? 0) * 0.1));
+          }
           view.setVisible(visibility > 0.02);
           view.setAlpha(visibility);
         }
@@ -410,9 +416,13 @@ export class GameScene extends Phaser.Scene {
               (enemy.type === "boss"
                 ? enemy.bossPattern === "laser-prime"
                   ? 14
+                  : enemy.bossPattern === "rift-warden"
+                    ? 16
                   : 18
                 : enemy.type === "brute"
                   ? 18
+                  : enemy.type === "shield-guard"
+                    ? 15
                   : 12)
           );
           view.setVisible(visibility > 0.02);
@@ -1216,6 +1226,118 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
+    if (effect.kind === "barrage-chain") {
+      const ring = this.add.circle(effect.position.x, effect.position.y, 10, 0x78f7ff, 0.24).setDepth(6.42);
+      for (let index = 0; index < 8; index += 1) {
+        const angle = (Math.PI * 2 * index) / 8;
+        const shard = this.add
+          .rectangle(effect.position.x, effect.position.y, 16, 3, index % 2 === 0 ? 0xffffff : 0x78f7ff, 0.9)
+          .setRotation(angle)
+          .setDepth(6.5);
+        this.tweens.add({
+          targets: shard,
+          x: effect.position.x + Math.cos(angle) * 34,
+          y: effect.position.y + Math.sin(angle) * 34,
+          alpha: 0,
+          scaleX: 0.35,
+          duration: 210,
+          ease: "Cubic.easeOut",
+          onComplete: () => shard.destroy()
+        });
+      }
+      this.tweens.add({
+        targets: ring,
+        radius: 42,
+        alpha: 0,
+        duration: 230,
+        ease: "Sine.easeOut",
+        onComplete: () => ring.destroy()
+      });
+      return;
+    }
+
+    if (effect.kind === "cannon-shock") {
+      const beam = this.add.rectangle(effect.position.x, effect.position.y, 92, 7, 0xffb357, 0.46).setDepth(6.38);
+      const core = this.add.rectangle(effect.position.x, effect.position.y, 46, 3, 0xfff0c8, 0.92).setDepth(6.48);
+      beam.setRotation(Phaser.Math.FloatBetween(-0.18, 0.18));
+      core.setRotation(beam.rotation);
+      this.tweens.add({
+        targets: [beam, core],
+        scaleX: 1.8,
+        alpha: 0,
+        duration: 220,
+        ease: "Cubic.easeOut",
+        onComplete: () => {
+          beam.destroy();
+          core.destroy();
+        }
+      });
+      return;
+    }
+
+    if (effect.kind === "scout-pulse") {
+      const ring = this.add.circle(effect.position.x, effect.position.y, 9, 0x93c5fd, 0.18).setDepth(6.34);
+      const scan = this.add.rectangle(effect.position.x, effect.position.y, 42, 2, 0xf9f871, 0.86).setDepth(6.45);
+      this.tweens.add({
+        targets: ring,
+        radius: 48,
+        alpha: 0,
+        duration: 260,
+        ease: "Sine.easeOut",
+        onComplete: () => ring.destroy()
+      });
+      this.tweens.add({
+        targets: scan,
+        y: effect.position.y - 22,
+        alpha: 0,
+        duration: 210,
+        ease: "Quad.easeOut",
+        onComplete: () => scan.destroy()
+      });
+      return;
+    }
+
+    if (effect.kind === "economy-glint") {
+      const coin = this.add.circle(effect.position.x, effect.position.y, 6, 0xffd36b, 0.88).setDepth(6.48);
+      const glint = this.add.rectangle(effect.position.x, effect.position.y, 28, 3, 0x7dff91, 0.78).setDepth(6.5);
+      glint.setRotation(Phaser.Math.FloatBetween(-0.8, 0.8));
+      this.tweens.add({
+        targets: [coin, glint],
+        y: effect.position.y - 18,
+        alpha: 0,
+        scaleX: 1.55,
+        scaleY: 1.55,
+        duration: 230,
+        ease: "Cubic.easeOut",
+        onComplete: () => {
+          coin.destroy();
+          glint.destroy();
+        }
+      });
+      return;
+    }
+
+    if (effect.kind === "synergy-flare" || effect.kind === "rift-spark") {
+      const color = effect.kind === "rift-spark" ? 0xb46bff : 0xffd36b;
+      const ring = this.add.circle(effect.position.x, effect.position.y, 12, color, 0.22).setDepth(6.46);
+      const cross = this.add.rectangle(effect.position.x, effect.position.y, 44, 4, 0xffffff, 0.82).setDepth(6.56);
+      const crossB = this.add.rectangle(effect.position.x, effect.position.y, 44, 4, color, 0.76).setDepth(6.55).setRotation(Math.PI / 2);
+      this.tweens.add({
+        targets: [ring, cross, crossB],
+        alpha: 0,
+        scaleX: 1.9,
+        scaleY: 1.9,
+        duration: 240,
+        ease: "Cubic.easeOut",
+        onComplete: () => {
+          ring.destroy();
+          cross.destroy();
+          crossB.destroy();
+        }
+      });
+      return;
+    }
+
     const pulse = this.add.circle(effect.position.x, effect.position.y, 10, effect.color, 0.16).setDepth(6.35);
     const crossA = this.add.rectangle(effect.position.x, effect.position.y, 26, 3, 0xffffff, 0.88).setDepth(6.45);
     const crossB = this.add.rectangle(effect.position.x, effect.position.y, 26, 3, effect.color, 0.88).setDepth(6.45).setRotation(Math.PI / 2);
@@ -1364,6 +1486,13 @@ function syncCollection<T extends Phaser.GameObjects.GameObject>(
 }
 
 function createObstacleShape(scene: Phaser.Scene, obstacle: SimulationState["run"]["obstacles"][number]): Phaser.GameObjects.Shape {
+  if (obstacle.kind === "rift-wall") {
+    return scene.add
+      .circle(obstacle.position.x, obstacle.position.y, obstacle.radius, obstacle.color, 0.42)
+      .setDepth(2.2)
+      .setStrokeStyle(3, 0xf2e7ff, 0.78);
+  }
+
   if (obstacle.kind === "crystal") {
     return scene.add
       .triangle(

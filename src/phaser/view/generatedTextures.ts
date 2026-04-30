@@ -44,6 +44,15 @@ export function createGeneratedTextures(scene: Phaser.Scene): void {
   graphics.generateTexture("enemy/brute", 38, 38);
   graphics.clear();
 
+  graphics.fillStyle(0x7cc7ff, 1);
+  graphics.fillRoundedRect(5, 4, 24, 28, 8);
+  graphics.lineStyle(4, 0xe7fbff, 0.92);
+  graphics.lineBetween(6, 7, 6, 31);
+  graphics.lineStyle(2, 0x1a4e7a, 0.86);
+  graphics.strokeRoundedRect(5, 4, 24, 28, 8);
+  graphics.generateTexture("enemy/shield-guard", 36, 36);
+  graphics.clear();
+
   graphics.fillStyle(0xff445f, 1);
   graphics.fillCircle(28, 28, 24);
   graphics.lineStyle(4, 0xffd3db, 0.95);

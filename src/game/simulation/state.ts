@@ -1,9 +1,17 @@
 import { defaultMetaState } from "./meta";
 import { characterSkillPool } from "../content/skills";
+import { calculateBranchProgress, getDominantUpgradeBranch } from "../content/upgrades";
 import { weaponModDefinitions } from "../content/weapons";
 import { distance } from "./math";
 import { randomChoice, randomFloat } from "./random";
 import { STORY_FINAL_STAGE, type PlayerState, type RunMode, type RunObjectiveState, type RunTheme, type SimulationState } from "./types";
+
+export function getXpToNextForLevel(level: number): number {
+  if (level <= 1) {
+    return 136;
+  }
+  return Math.round(116 + level * 58 + Math.max(0, level - 4) * 16 + Math.max(0, level - 9) * 24);
+}
 
 function createPlayerState(
   weaponId: PlayerState["weaponId"],
@@ -20,11 +28,12 @@ function createPlayerState(
     maxShield: 80,
     xp: 0,
     xpLevel: 1,
-    xpToNext: 82,
+    xpToNext: getXpToNextForLevel(1),
     moveSpeed: 220,
     dashCooldown: dashVariantUnlocked ? 2.2 : 2.8,
     dashTimer: 0,
     dashDistance: dashVariantUnlocked ? 168 : 142,
+    dashState: null,
     weaponId,
     weaponLevel: 1,
     weaponCooldown: 0,
@@ -59,11 +68,13 @@ function createPlayerState(
 }
 
 function getThemeForStage(stage: number): RunTheme {
-  const cycle = Math.max(0, stage - 1) % 3;
-  if (cycle === 1) {
+  if (stage >= 10) {
+    return "siege";
+  }
+  if (stage >= 7) {
     return "crossfire";
   }
-  if (cycle === 2) {
+  if (stage >= 4) {
     return "siege";
   }
   return "skirmish";
@@ -89,13 +100,22 @@ export function getObjectiveTargetForStage(
   if (runMode !== "story") {
     return base;
   }
+  if (stage <= 3) {
+    if (kind === "collect-shards") {
+      return Math.round(base * 1.18) + 4;
+    }
+    if (kind === "defeat-enemies") {
+      return Math.round(base * 1.18) + 2;
+    }
+    return Math.round(base * 1.16) + 6;
+  }
   if (kind === "collect-shards") {
-    return Math.round(base * 1.55) + 8;
+    return Math.round(base * 1.38) + 6;
   }
   if (kind === "defeat-enemies") {
-    return Math.round(base * 1.48) + 4;
+    return Math.round(base * 1.34) + 3;
   }
-  return Math.round(base * 1.4) + 14;
+  return Math.round(base * 1.3) + 10;
 }
 
 function createRunObjective(
@@ -120,7 +140,7 @@ function createRunObjective(
       target,
       progress: 0,
       rewardShards: 15 + cycle * 3,
-      rewardXp: 6 + cycle * 2,
+      rewardXp: 5 + Math.floor(cycle * 1.3),
       baselineTime: time,
       baselineBankedShards: bankedShards,
       baselineEnemiesDestroyed: enemiesDestroyed,
@@ -141,7 +161,7 @@ function createRunObjective(
       target,
       progress: 0,
       rewardShards: 18 + cycle * 3,
-      rewardXp: 8 + cycle * 2,
+      rewardXp: 6 + Math.floor(cycle * 1.3),
       baselineTime: time,
       baselineBankedShards: bankedShards,
       baselineEnemiesDestroyed: enemiesDestroyed,
@@ -161,7 +181,7 @@ function createRunObjective(
     target,
     progress: 0,
     rewardShards: 17 + cycle * 4,
-    rewardXp: 10 + cycle * 2,
+    rewardXp: 7 + Math.floor(cycle * 1.3),
     baselineTime: time,
     baselineBankedShards: bankedShards,
     baselineEnemiesDestroyed: enemiesDestroyed,
@@ -235,6 +255,7 @@ export function createInitialState(): SimulationState {
       },
       bossRewardChest: {
         active: false,
+        claimed: false,
         position: { x: 0, y: 0 },
         radius: 48,
         rewardType: null
@@ -246,9 +267,26 @@ export function createInitialState(): SimulationState {
       offeredUpgrades: [],
       upgradeOfferSource: "level-up",
       appliedUpgrades: [],
+      upgradeStacks: {},
+      branchProgress: {},
+      dominantBranch: null,
+      activeSynergies: [],
+      antiCamp: {
+        anchor: { x: 640, y: 360 },
+        lowMoveTime: 0,
+        shotHeat: 0,
+        obstacleDensity: 0,
+        activeUntil: 0
+      },
+      queuedLevelUpAfterReward: false,
+      queuedLevelUpTimer: 0,
       activeHazardTier: 0,
       bossEventTriggered: false,
       bossSpawnCount: 0,
+      timeBossSpawnCount: 0,
+      stageBossSpawnCount: 0,
+      nextTimeBossAt: 30,
+      bossCooldownUntil: 0,
       bossDefeats: 0,
       bossLegendaryCharge: 0,
       pendingBossReward: null,
@@ -262,7 +300,9 @@ export function createInitialState(): SimulationState {
       runMode: "infinite",
       storyArcComplete: false,
       stageLore: null,
-      pendingStageLoreQueue: []
+      pendingStageLoreQueue: [],
+      stageAdvanceLocked: false,
+      stageReadyToAdvance: false
     },
     meta: { ...defaultMetaState },
     rngSeed: 1337,
@@ -283,6 +323,7 @@ export function createRunState(
     chosenWeapon
   );
   const obstacleResult = generateObstacles(previous.world.seed, previous.world.chunkSize, basePlayer.position);
+  const initialBranchProgress = calculateBranchProgress({}, []);
   const supplyInventory = { ...previous.meta.supplyInventory };
   const activatedSupplies: string[] = [];
   let emergencyRepairCharges = 0;
@@ -353,6 +394,7 @@ export function createRunState(
       },
       bossRewardChest: {
         active: false,
+        claimed: false,
         position: { x: 0, y: 0 },
         radius: 48,
         rewardType: null
@@ -364,9 +406,26 @@ export function createRunState(
       offeredUpgrades: [],
       upgradeOfferSource: "level-up",
       appliedUpgrades: [],
+      upgradeStacks: {},
+      branchProgress: initialBranchProgress,
+      dominantBranch: getDominantUpgradeBranch(initialBranchProgress),
+      activeSynergies: [],
+      antiCamp: {
+        anchor: { ...basePlayer.position },
+        lowMoveTime: 0,
+        shotHeat: 0,
+        obstacleDensity: 0,
+        activeUntil: 0
+      },
+      queuedLevelUpAfterReward: false,
+      queuedLevelUpTimer: 0,
       activeHazardTier: 0,
       bossEventTriggered: false,
       bossSpawnCount: 0,
+      timeBossSpawnCount: 0,
+      stageBossSpawnCount: 0,
+      nextTimeBossAt: 30,
+      bossCooldownUntil: 0,
       bossDefeats: 0,
       bossLegendaryCharge: 0,
       pendingBossReward: null,
@@ -385,7 +444,9 @@ export function createRunState(
       runMode,
       storyArcComplete: false,
       stageLore: runMode === "story" ? { stage: 1 } : null,
-      pendingStageLoreQueue: []
+      pendingStageLoreQueue: [],
+      stageAdvanceLocked: false,
+      stageReadyToAdvance: false
     }
   };
 }
@@ -459,5 +520,3 @@ function hashChunkSeed(baseSeed: number, chunkX: number, chunkY: number): number
   hash = (hash ^ (hash >>> 13)) * 1274126177;
   return hash >>> 0;
 }
-
-

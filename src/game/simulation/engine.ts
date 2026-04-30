@@ -1,10 +1,17 @@
 import { enemyDefinitions, getEnemySpawnMix } from "../content/enemies";
 import {
+  calculateBranchProgress,
   getBarrierOrbitSegmentCount,
+  getBranchVisual,
+  getDominantUpgradeBranch,
+  getUpgradeMaxStacks,
+  getUpgradeRole,
+  getUpgradeVisualFamily,
   upgradeBranchLabels,
   upgradeDefinitions,
   upgradePool,
   upgradeTreeMeta,
+  type UpgradeBranch,
   type UpgradeDefinition,
   type UpgradeId
 } from "../content/upgrades";
@@ -14,9 +21,10 @@ import type { InputSnapshot } from "../input/actions";
 import { add, clamp, distance, distancePointToSegment, fromAngle, normalize, scale, subtract } from "./math";
 import { buyMetaUpgrade, buyPreRunSupply, buyWeaponMod } from "./meta";
 import { randomChoice, randomFloat } from "./random";
-import { createRunState, getObjectiveTargetForStage } from "./state";
+import { createRunState, getObjectiveTargetForStage, getXpToNextForLevel } from "./state";
 import {
   STORY_FINAL_STAGE,
+  type BuildSynergyId,
   type BossPattern,
   type EnemyState,
   type HazardState,
@@ -36,6 +44,8 @@ import {
 
 /** 全局弹体射程系数（飞行时间秒）；小于 1 时等比例缩短敌我弹道最大距离 */
 const PROJECTILE_LIFE_GLOBAL_SCALE = 0.72;
+const STORY_STAGE_ADVANCE_HINT = "阶段目标已完成，正在等待战场稳定和播报结算；读完本阶段信息后才会进入下一阶段。";
+const BOSS_GLOBAL_COOLDOWN_SECONDS = 38;
 
 export type UiCommand =
   | { type: "start-run"; weaponId?: WeaponId; runMode?: RunMode }
@@ -80,6 +90,9 @@ export function updateSimulation(
   next = tickHitEffects(next, deltaSeconds);
   next = tickAnnouncement(next, deltaSeconds);
   next = tickPlayer(next, deltaSeconds, input);
+  next = updateAntiCamp(next, deltaSeconds, input);
+  next = updateBuildSynergies(next);
+  next = tickTemporaryRiftWalls(next, deltaSeconds);
   next = refreshWorldChunks(next);
   next = spawnEnemies(next, deltaSeconds);
   next = updateEnemies(next, deltaSeconds);
@@ -97,6 +110,7 @@ export function updateSimulation(
   next = maybeUnlockExtraction(next);
   next = updateExtraction(next, deltaSeconds, input);
   next = maybeTriggerBossEvent(next);
+  next = tickQueuedLevelUp(next, deltaSeconds);
   next = maybeOfferLevelUp(next);
   if (next.run.status !== "running") {
     return next;
@@ -199,12 +213,18 @@ function applyCommand(state: SimulationState, command: UiCommand): SimulationSta
       return endRun(state, "cleared");
     case "dismiss-stage-lore":
       if (state.run.stageLore) {
-        return maybeFlushPendingStageLore({ ...state, run: { ...state.run, stageLore: null } });
+        return maybeFlushPendingStageLore({
+          ...state,
+          run: { ...state.run, stageLore: null, stageAdvanceLocked: false, stageReadyToAdvance: false }
+        });
       }
       return state;
     case "toggle-pause":
       if (state.run.stageLore) {
-        return maybeFlushPendingStageLore({ ...state, run: { ...state.run, stageLore: null } });
+        return maybeFlushPendingStageLore({
+          ...state,
+          run: { ...state.run, stageLore: null, stageAdvanceLocked: false, stageReadyToAdvance: false }
+        });
       }
       if (state.run.status === "running") {
         return { ...state, run: { ...state.run, status: "paused" } };
@@ -258,6 +278,10 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
   let emergencyRepairCharges = state.run.emergencyRepairCharges;
   let extraBankedShards = 0;
   const applied = [...state.run.appliedUpgrades, upgradeId];
+  const upgradeStacks = {
+    ...(state.run.upgradeStacks ?? {}),
+    [upgradeId]: (state.run.upgradeStacks?.[upgradeId] ?? 0) + 1
+  };
   const definition = upgradeDefinitions[upgradeId];
   const discoveredUpgradeIds = state.meta.discoveredUpgradeIds.includes(upgradeId)
     ? state.meta.discoveredUpgradeIds
@@ -268,7 +292,7 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       player.weaponLevel += 1;
       break;
     case "overclock-rounds":
-      player.damageMultiplier *= 1.18;
+      player.damageMultiplier *= stackMultiplier(1.15, upgradeStacks[upgradeId] ?? 1, 0.035);
       break;
     case "heat-sink":
       player.fireRateMultiplier *= 1.08;
@@ -289,7 +313,7 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       player.damageReduction += 0.12;
       break;
     case "rapid-cycle":
-      player.fireRateMultiplier *= 1.2;
+      player.fireRateMultiplier *= stackMultiplier(1.16, upgradeStacks[upgradeId] ?? 1, 0.035);
       break;
     case "blink-drive":
       player.dashCooldown *= 0.82;
@@ -300,7 +324,7 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       player.shardMagnet += 34;
       break;
     case "salvage-net":
-      player.xpMultiplier *= 1.2;
+      player.xpMultiplier *= stackMultiplier(1.14, upgradeStacks[upgradeId] ?? 1, 0.025);
       break;
     case "compound-interest":
       player.economyMultiplier *= 1.18;
@@ -389,13 +413,15 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       break;
     case "bank-heist":
       player.economyMultiplier *= 1.14;
-      player.xpMultiplier *= 1.1;
+      player.xpMultiplier *= stackMultiplier(1.06, upgradeStacks[upgradeId] ?? 1, 0.02);
       break;
     case "survey-array":
       player.visionRadius += 95;
+      player.homingStrength += 0.025;
       break;
     case "deep-radar":
       player.visionRadius += 155;
+      player.homingStrength += 0.08;
       break;
     case "vector-plate":
     case "orbit-plate-1":
@@ -424,6 +450,21 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       break;
   }
 
+  const branchProgress = calculateBranchProgress(upgradeStacks, applied);
+  const dominantBranch = getDominantUpgradeBranch(branchProgress);
+  const activeSynergies = calculateActiveSynergies(branchProgress);
+  const newSynergies = activeSynergies.filter((id) => !state.run.activeSynergies.includes(id));
+  const upgradeBranch = upgradeTreeMeta[upgradeId].branch;
+  const branchVisual = getBranchVisual(upgradeBranch);
+  const role = getUpgradeRole(upgradeId);
+  const sourceWasBossReward = state.run.upgradeOfferSource !== "level-up";
+  const shouldQueueLevelUp = sourceWasBossReward && player.xp >= player.xpToNext;
+  const roleLabel = role === "capstone" ? "终局件" : role === "combo" ? "成型件" : role === "engine" ? "核心件" : "凑牌件";
+  const stackText =
+    getUpgradeMaxStacks(upgradeId) > 1
+      ? `第 ${upgradeStacks[upgradeId]}/${getUpgradeMaxStacks(upgradeId)} 层`
+      : roleLabel;
+
   return {
     ...state,
     meta: {
@@ -438,17 +479,25 @@ function applyUpgrade(state: SimulationState, upgradeId: UpgradeId): SimulationS
       hazards,
       bankedShards: state.run.bankedShards + extraBankedShards,
       appliedUpgrades: applied,
+      upgradeStacks,
+      branchProgress,
+      dominantBranch,
+      activeSynergies,
+      queuedLevelUpAfterReward: shouldQueueLevelUp,
+      queuedLevelUpTimer: shouldQueueLevelUp ? 0.25 : 0,
       offeredUpgrades: [],
       upgradeOfferSource: "level-up",
       // 复制体击杀常伴随经验升级：先弹出普通三选一时不应吞掉仍待领取的副本宝箱奖励。
       pendingBossReward:
         state.run.upgradeOfferSource === "level-up" ? state.run.pendingBossReward : null,
       emergencyRepairCharges,
-      tutorialHint: `构筑已接入：${definition.title}。`,
+      tutorialHint: `${branchVisual.label}接入：${definition.title}（${stackText}）。`,
         announcement: createAnnouncement(
           state.nextId,
-          "构筑完成",
-          `${upgradeBranchLabels[upgradeTreeMeta[upgradeId].branch]} · ${definition.title} 已接入，继续沿当前路线推进。`,
+          newSynergies.length > 0 ? "流派协同成型" : role === "capstone" ? branchVisual.formedText : "构筑接入",
+          newSynergies.length > 0
+            ? `${getSynergyLabel(newSynergies[0])} 已接入 · ${definition.title}`
+            : `${upgradeBranchLabels[upgradeBranch]} · ${definition.title} · ${stackText}`,
           "upgrade"
         ),
         screenFlash: 0.9
@@ -462,20 +511,49 @@ function tickPlayer(state: SimulationState, deltaSeconds: number, input: InputSn
   player.skillCooldown = Math.max(0, player.skillCooldown - deltaSeconds);
   player.skillEffectTimer = Math.max(0, player.skillEffectTimer - deltaSeconds);
   const overdriveMultiplier = player.characterSkillId === "overdrive-core" && player.skillEffectTimer > 0 ? 1.18 : 1;
-  player.velocity = scale(moveDirection, player.moveSpeed * overdriveMultiplier);
-  player.position = resolveObstacleCollision(add(player.position, scale(player.velocity, deltaSeconds)), player.radius, state.run.obstacles);
   player.weaponCooldown = Math.max(0, player.weaponCooldown - deltaSeconds);
   player.dashTimer = Math.max(0, player.dashTimer - deltaSeconds);
   player.shieldRegenDelay = Math.max(0, player.shieldRegenDelay - deltaSeconds);
 
-  if (input.dash && player.dashTimer <= 0) {
+  if (input.dash && player.dashTimer <= 0 && !player.dashState) {
     const dashDirection = moveDirection.x === 0 && moveDirection.y === 0 ? normalize(input.aim) : moveDirection;
-    player.position = resolveObstacleCollision(add(player.position, scale(dashDirection, player.dashDistance)), player.radius, state.run.obstacles);
+    const dashDuration = 0.18;
+    player.dashState = {
+      direction: dashDirection,
+      remaining: dashDuration,
+      duration: dashDuration,
+      speed: player.dashDistance / dashDuration,
+      phaseBurstFired: false
+    };
     player.dashTimer = player.dashCooldown;
   }
 
+  const dashState = player.dashState;
+  if (dashState && dashState.remaining > 0) {
+    const dashStep = Math.min(deltaSeconds, dashState.remaining);
+    const dashVelocity = scale(dashState.direction, dashState.speed);
+    player.velocity = add(scale(moveDirection, player.moveSpeed * overdriveMultiplier * 0.25), dashVelocity);
+    player.position = resolveObstacleCollision(add(player.position, scale(player.velocity, dashStep)), player.radius, state.run.obstacles);
+    player.dashState = {
+      ...dashState,
+      remaining: Math.max(0, dashState.remaining - deltaSeconds)
+    };
+    if (player.dashState.remaining <= 0) {
+      player.dashState = null;
+    }
+  } else {
+    player.velocity = scale(moveDirection, player.moveSpeed * overdriveMultiplier);
+    player.position = resolveObstacleCollision(add(player.position, scale(player.velocity, deltaSeconds)), player.radius, state.run.obstacles);
+  }
+
   let next = { ...state, run: { ...state.run, player } };
-  if (input.dash && player.dashTimer > 0 && player.characterSkillId === "phase-burst" && player.skillCooldown <= 0) {
+  if (
+    dashState &&
+    dashState.remaining > 0 &&
+    player.dashState == null &&
+    player.characterSkillId === "phase-burst" &&
+    player.skillCooldown <= 0
+  ) {
     next = triggerPhaseBurst(next);
   }
   if (input.fire) {
@@ -529,7 +607,7 @@ function refreshWorldChunks(state: SimulationState): SimulationState {
     return state;
   }
 
-  const retainedObstacles = state.run.obstacles.filter((obstacle) => retainChunkSet.has(obstacle.chunkKey));
+  const retainedObstacles = state.run.obstacles.filter((obstacle) => obstacle.kind === "rift-wall" || retainChunkSet.has(obstacle.chunkKey));
   const addedObstacles = generateChunkObstacles(state.world.seed, state.world.chunkSize, missingChunkKeys);
 
   return {
@@ -567,6 +645,99 @@ function triggerPhaseBurst(state: SimulationState): SimulationState {
   };
 }
 
+function calculateActiveSynergies(progress: Partial<Record<UpgradeBranch, number>>): BuildSynergyId[] {
+  const ready = (branch: UpgradeBranch, threshold = 4.6) => (progress[branch] ?? 0) >= threshold;
+  const synergies: BuildSynergyId[] = [];
+  if (ready("barrage") && ready("precision")) {
+    synergies.push("barrage-cannon");
+  }
+  if (ready("survival") && ready("barrier")) {
+    synergies.push("survival-barrier");
+  }
+  if (ready("scout") && ready("economy")) {
+    synergies.push("scout-economy");
+  }
+  if (ready("mobility") && ready("barrage")) {
+    synergies.push("mobility-barrage");
+  }
+  return synergies;
+}
+
+function stackMultiplier(base: number, stack: number, falloff: number): number {
+  return Math.max(1.02, base - Math.max(0, stack - 1) * falloff);
+}
+
+function getSynergyLabel(id: BuildSynergyId): string {
+  switch (id) {
+    case "barrage-cannon":
+      return "火网重炮";
+    case "survival-barrier":
+      return "稳态盾阵";
+    case "scout-economy":
+      return "雷达打捞";
+    case "mobility-barrage":
+      return "游击火网";
+    default:
+      return "协同构筑";
+  }
+}
+
+function updateBuildSynergies(state: SimulationState): SimulationState {
+  const activeSynergies = calculateActiveSynergies(state.run.branchProgress ?? {});
+  if (activeSynergies.join(",") === state.run.activeSynergies.join(",")) {
+    return state;
+  }
+  const newSynergy = activeSynergies.find((id) => !state.run.activeSynergies.includes(id));
+  return {
+    ...state,
+    nextId: newSynergy ? state.nextId + 1 : state.nextId,
+    run: {
+      ...state.run,
+      activeSynergies,
+      announcement: newSynergy
+        ? createAnnouncement(state.nextId, "流派协同", `${getSynergyLabel(newSynergy)} 已形成，战斗反馈和数值联动已启用。`, "upgrade", 3.4)
+        : state.run.announcement,
+      tutorialHint: newSynergy ? `${getSynergyLabel(newSynergy)}：两条路线开始互相放大。` : state.run.tutorialHint,
+      screenFlash: newSynergy ? Math.max(state.run.screenFlash, 0.55) : state.run.screenFlash
+    }
+  };
+}
+
+function updateAntiCamp(state: SimulationState, deltaSeconds: number, input: InputSnapshot): SimulationState {
+  const antiCamp = { ...state.run.antiCamp };
+  const movedFromAnchor = distance(state.run.player.position, antiCamp.anchor);
+  if (movedFromAnchor > 118) {
+    antiCamp.anchor = { ...state.run.player.position };
+    antiCamp.lowMoveTime = 0;
+    antiCamp.shotHeat = 0;
+  } else {
+    antiCamp.lowMoveTime += state.run.player.dashState ? 0 : deltaSeconds;
+    antiCamp.shotHeat = Math.max(0, antiCamp.shotHeat - deltaSeconds * 0.45) + (input.fire ? deltaSeconds * 1.8 : 0);
+  }
+  antiCamp.obstacleDensity = state.run.obstacles.filter((obstacle) => distance(obstacle.position, state.run.player.position) <= 165).length;
+  if (antiCamp.lowMoveTime >= 2.4 && antiCamp.shotHeat >= 1.2 && antiCamp.obstacleDensity >= 3) {
+    antiCamp.activeUntil = 4.2;
+    antiCamp.anchor = {
+      x: antiCamp.anchor.x * 0.65 + state.run.player.position.x * 0.35,
+      y: antiCamp.anchor.y * 0.65 + state.run.player.position.y * 0.35
+    };
+  } else {
+    antiCamp.activeUntil = Math.max(0, antiCamp.activeUntil - deltaSeconds);
+  }
+  return { ...state, run: { ...state.run, antiCamp } };
+}
+
+function tickTemporaryRiftWalls(state: SimulationState, deltaSeconds: number): SimulationState {
+  const obstacles = state.run.obstacles.flatMap((obstacle) => {
+    if (obstacle.kind !== "rift-wall") {
+      return [obstacle];
+    }
+    const ttl = (obstacle.ttl ?? 0) - deltaSeconds;
+    return ttl > 0 ? [{ ...obstacle, ttl }] : [];
+  });
+  return obstacles.length === state.run.obstacles.length ? state : { ...state, run: { ...state.run, obstacles } };
+}
+
 function firePlayerWeapon(state: SimulationState, aimDirection: Vec2): SimulationState {
   const player = { ...state.run.player };
   const weapon = weaponDefinitions[player.weaponId];
@@ -598,6 +769,11 @@ function firePlayerWeapon(state: SimulationState, aimDirection: Vec2): Simulatio
 
   if (player.rearShot) {
     projectiles.push(createProjectile(state, player, angle + Math.PI, weapon, projectiles.length, 0.88));
+  }
+
+  if (state.run.activeSynergies.includes("mobility-barrage") && Math.hypot(player.velocity.x, player.velocity.y) > player.moveSpeed * 0.85) {
+    projectiles.push(createProjectile(state, player, angle + 0.52, weapon, projectiles.length, 0.58));
+    projectiles.push(createProjectile(state, player, angle - 0.52, weapon, projectiles.length, 0.58));
   }
 
   return {
@@ -645,16 +821,17 @@ function createProjectile(
       weapon.damage *
       (1 + (weaponLevelMultiplier - 1) * 0.12) *
       damageScale *
+      (state.run.activeSynergies.includes("barrage-cannon") ? 1.12 : 1) *
       player.damageMultiplier *
       (state.run.extraction.unlocked && state.run.appliedUpgrades.includes("pressure-core") ? 1.12 : 1),
     color: weapon.color,
-    pierceLeft: weapon.pierce + player.extraPierce,
+    pierceLeft: weapon.pierce + player.extraPierce + (state.run.activeSynergies.includes("barrage-cannon") ? 1 : 0),
     obstaclePierceLeft: weapon.obstaclePierce,
     explosiveRadius: player.explosiveShots,
     ricochetLeft: player.ricochetShots,
     obstacleRicochets: 0,
     catacombBonusSpent: false,
-    homingStrength: player.homingStrength
+    homingStrength: player.homingStrength + (state.run.activeSynergies.includes("scout-economy") ? 0.04 : 0)
   };
 }
 
@@ -664,26 +841,30 @@ function spawnEnemies(state: SimulationState, deltaSeconds: number): SimulationS
   const stagePressure = Math.floor((state.run.objective.stage - 1) / 3);
   const riskPressure = state.run.riskProtocolTier * 1.25;
   const themeCountBonus = state.run.stageTheme === "siege" ? 2 : state.run.stageTheme === "crossfire" ? 1 : 0;
+  const lateMinutes = Math.max(0, (state.run.time - 600) / 60);
+  const latePressure = Math.min(5.5, lateMinutes * 1.65);
   const desiredCount = Math.max(
     2,
     Math.floor(
       (bossActive ? 2 : 4) +
-        state.run.time / 14 +
+        Math.min(34, state.run.time / 18) +
         state.run.unbankedShards / 55 +
-        stagePressure * 1.5 +
+        stagePressure * 1.25 +
         themeCountBonus +
         riskPressure -
-        earlyPenalty
+        earlyPenalty +
+        latePressure
     )
   );
   const themeRateBonus = state.run.stageTheme === "siege" ? 0.26 : state.run.stageTheme === "crossfire" ? 0.14 : 0;
   const spawnRate = clamp(
-    (state.run.time < 75 ? 0.72 + state.run.time / 120 : 1.3 + state.run.time / 55) +
-      stagePressure * 0.18 +
+    (state.run.time < 75 ? 0.72 + state.run.time / 120 : 1.18 + Math.min(6.2, state.run.time / 82)) +
+      stagePressure * 0.14 +
       themeRateBonus +
-      state.run.riskProtocolTier * 0.22,
+      state.run.riskProtocolTier * 0.22 +
+      Math.min(1.6, lateMinutes * 0.26),
     0.72,
-    7.2
+    8.6
   );
   const spawnInterval = 1 / spawnRate;
   let accumulator = state.run.spawnAccumulator + deltaSeconds;
@@ -723,8 +904,17 @@ function spawnSingleEnemy(state: SimulationState): SimulationState {
   const position = add(state.run.player.position, scale(fromAngle(angle), radius));
 
   const eliteUnlocked = state.run.time > 150;
-  const eliteModifier = eliteUnlocked && modifierRoll.value > 0.84 ? (modifierRoll.value > 0.92 ? "volatile" : "fast") : null;
-  const hpBonus = (eliteModifier ? 1.35 : 1) * (1 + state.run.riskProtocolTier * 0.12);
+  const eliteThreshold = Math.max(0.72, 0.86 - Math.max(0, state.run.time - 600) / 2600);
+  const eliteModifier =
+    choice.value !== "shield-guard" && eliteUnlocked && modifierRoll.value > eliteThreshold
+      ? modifierRoll.value > 0.94
+        ? "volatile"
+        : "fast"
+      : null;
+  const hpBonus =
+    (eliteModifier ? 1.35 : 1) *
+    (1 + state.run.riskProtocolTier * 0.12) *
+    (1 + Math.max(0, state.run.time - 600) / 2400);
   const color = eliteModifier === "volatile" ? 0xffe670 : definition.color;
   const enemy: EnemyState = {
     id: `e-${state.nextId}`,
@@ -744,6 +934,12 @@ function spawnSingleEnemy(state: SimulationState): SimulationState {
     touchCooldown: 0,
     color
   };
+
+  if (enemy.type === "shield-guard") {
+    enemy.shieldFacing = normalize(subtract(state.run.player.position, enemy.position));
+    enemy.shieldArc = Math.PI * 0.58;
+    enemy.shieldDamageReduction = 0.68;
+  }
 
   return {
     ...state,
@@ -766,14 +962,17 @@ function spawnBoss(
   const angle = angleRoll.value * Math.PI * 2;
   const position = add(state.run.player.position, scale(fromAngle(angle), 420));
   const radiusScale =
-    (pattern === "artillery" ? 1.42 : pattern === "charger" ? 1.28 : 1.55) * (options?.radiusMultiplier ?? 1);
+    (pattern === "artillery" ? 1.42 : pattern === "charger" ? 1.28 : pattern === "rift-warden" ? 1.62 : 1.55) *
+    (options?.radiusMultiplier ?? 1);
   const lateBossHp =
-    1 + Math.min(1.45, state.run.bossDefeats * 0.12 + state.run.objective.stage * 0.04);
+    1 + Math.min(3.6, state.run.bossDefeats * 0.2 + state.run.objective.stage * 0.07 + Math.max(0, state.run.time - 540) / 520);
+  const storyLateWall = state.run.runMode === "story" && state.run.objective.stage >= 9 ? 1.65 : 1;
   const hpScale =
-    (pattern === "artillery" ? 1.14 : pattern === "charger" ? 1.06 : 1.26) *
+    (pattern === "artillery" ? 1.14 : pattern === "charger" ? 1.06 : pattern === "rift-warden" ? 1.38 : 1.26) *
     (options?.hpMultiplier ?? 1) *
     (1 + state.run.riskProtocolTier * 0.16) *
-    lateBossHp;
+    lateBossHp *
+    storyLateWall;
   const bossHp = definition.health * hpScale * 2;
   const enemy: EnemyState = {
     id: `e-${state.nextId}`,
@@ -785,13 +984,16 @@ function spawnBoss(
     radius: definition.radius * radiusScale,
     hp: bossHp,
     maxHp: bossHp,
-    fireCooldown: pattern === "laser-prime" ? 0.55 : 0.7,
-    skillCooldown: pattern === "laser-prime" ? 2 : 1.8,
-    secondaryCooldown: pattern === "laser-prime" ? 4.2 : 3.4,
+    fireCooldown: pattern === "laser-prime" ? 0.55 : pattern === "rift-warden" ? 0.85 : 0.7,
+    skillCooldown: pattern === "laser-prime" ? 2 : pattern === "rift-warden" ? 1.5 : 1.8,
+    secondaryCooldown: pattern === "laser-prime" ? 4.2 : pattern === "rift-warden" ? 3.2 : 3.4,
     chargeTimer: 0,
     chargeDirection: { x: 0, y: 0 },
     touchCooldown: 0,
-    color: options?.colorOverride ?? (pattern === "artillery" ? 0xff516b : pattern === "charger" ? 0xff7a4a : 0x48e8ff),
+    color:
+      options?.colorOverride ??
+      (pattern === "artillery" ? 0xff516b : pattern === "charger" ? 0xff7a4a : pattern === "rift-warden" ? 0xb46bff : 0x48e8ff),
+    bossSpawnProtectionUntil: state.run.time + (state.run.objective.stage >= 9 ? 1.8 : 1.25),
     bossLaserPhase: pattern === "laser-prime" ? 0 : undefined
   };
 
@@ -854,6 +1056,7 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
   const player = state.run.player;
   const projectiles = [...state.run.projectiles];
   const hazards = [...state.run.hazards];
+  let obstacles = [...state.run.obstacles];
   let hp = player.hp;
   let shield = player.shield;
   let regenDelay = player.shieldRegenDelay;
@@ -874,16 +1077,20 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
     const steer =
       enemy.type === "boss" && enemyNext.chargeTimer > 0
         ? enemyNext.chargeDirection
-        : steerEnemyAroundObstacles(enemy.position, player.position, state.run.obstacles, enemy.radius);
+        : steerEnemyAroundObstacles(enemy.position, player.position, obstacles, enemy.radius);
     const speedBase = enemy.modifier === "fast" ? definition.speed * 1.35 : definition.speed;
     const chargeMultiplier = enemy.type === "boss" && enemyNext.chargeTimer > 0 ? 3.15 : 1;
     const speed = speedBase * chargeMultiplier * (state.run.extraction.unlocked ? 1.08 : 1);
     enemyNext.velocity = scale(steer, speed);
-    enemyNext.position = resolveObstacleCollision(add(enemy.position, scale(enemyNext.velocity, deltaSeconds)), enemy.radius, state.run.obstacles);
+    enemyNext.position = resolveObstacleCollision(add(enemy.position, scale(enemyNext.velocity, deltaSeconds)), enemy.radius, obstacles);
+    if (enemy.type === "shield-guard") {
+      enemyNext.shieldFacing = normalize(subtract(player.position, enemyNext.position));
+    }
 
     if (enemy.type === "boss") {
-      const bossUpdate = updateBossSkills(state, enemyNext, projectiles, hazards, nextId);
+      const bossUpdate = updateBossSkills({ ...state, run: { ...state.run, obstacles } }, enemyNext, projectiles, hazards, obstacles, nextId);
       nextId = bossUpdate.nextId;
+      obstacles = bossUpdate.obstacles;
       screenFlash = Math.max(screenFlash, bossUpdate.screenFlash);
     }
 
@@ -892,8 +1099,8 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
         enemy.type === "boss" && enemyNext.chargeTimer > 0
           ? definition.contactDamage * 1.9
           : definition.contactDamage;
-      if (!isApexSanctuaryInvulnerable(state)) {
-        const damageResult = applyIncomingDamage(shield, hp, contactDamage * (1 - clamp(player.damageReduction, 0, 0.6)));
+      if (!isPlayerInvulnerable(state)) {
+        const damageResult = applyIncomingDamage(shield, hp, contactDamage * (1 - getEffectiveDamageReduction(state)));
         if (player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
           skillCooldown = 14;
           skillEffectTimer = 4.5;
@@ -909,8 +1116,10 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
             : "被复制体近身压制击毁"
           : enemy.type === "brute"
             ? "被厚甲单位贴身碾碎"
-            : enemy.type === "sniper"
-              ? "被远程目标贴近补伤收掉"
+          : enemy.type === "sniper"
+            ? "被远程目标贴近补伤收掉"
+            : enemy.type === "shield-guard"
+              ? "被盾牌守卫贴身撞破护盾"
               : "被近身敌群围死";
       regenDelay = 4;
       screenFlash = 1;
@@ -944,6 +1153,31 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
       enemyNext.fireCooldown = definition.rangedCooldown ?? 2.4;
     }
 
+    if (enemy.type === "shield-guard" && enemyNext.fireCooldown <= 0 && distance(enemy.position, player.position) > 120) {
+      const shotDirection = normalize(subtract(player.position, enemy.position));
+      const speed = state.run.antiCamp.activeUntil > 0 ? 250 : 210;
+      projectiles.push({
+        id: `ep-${nextId}`,
+        source: "enemy",
+        position: add(enemy.position, scale(shotDirection, enemy.radius + 10)),
+        velocity: scale(shotDirection, speed),
+        radius: 5.8,
+        life: 2.45 * PROJECTILE_LIFE_GLOBAL_SCALE,
+        damage: state.run.antiCamp.activeUntil > 0 ? 12 : 9,
+        color: 0x7cc7ff,
+        pierceLeft: 0,
+        obstaclePierceLeft: 0,
+        explosiveRadius: 0,
+        ricochetLeft: 0,
+        obstacleRicochets: 0,
+        catacombBonusSpent: false,
+        homingStrength: 0,
+        damageChannel: "ranged"
+      });
+      nextId += 1;
+      enemyNext.fireCooldown = (definition.rangedCooldown ?? 4.2) * (state.run.antiCamp.activeUntil > 0 ? 0.92 : 1);
+    }
+
     return enemyNext.hp > 0 ? [enemyNext] : [];
   });
 
@@ -961,6 +1195,7 @@ function updateEnemies(state: SimulationState, deltaSeconds: number): Simulation
         skillEffectTimer
       },
       enemies,
+      obstacles,
       hazards,
       projectiles,
       lastDamageSource,
@@ -996,9 +1231,11 @@ function updateBossSkills(
   enemy: EnemyState,
   projectiles: ProjectileState[],
   hazards: HazardState[],
+  obstacles: ObstacleState[],
   nextId: number
-): { nextId: number; screenFlash: number } {
+): { nextId: number; obstacles: ObstacleState[]; screenFlash: number } {
   let localNextId = nextId;
+  let nextObstacles = obstacles;
   let screenFlash = state.run.screenFlash;
   const toPlayer = normalize(subtract(state.run.player.position, enemy.position));
   const distanceToPlayer = distance(enemy.position, state.run.player.position);
@@ -1133,7 +1370,73 @@ function updateBossSkills(
     }
   }
 
-  return { nextId: localNextId, screenFlash };
+  if (enemy.bossPattern === "rift-warden") {
+    const pressure = 1 + Math.min(0.7, state.run.bossDefeats * 0.06 + Math.max(0, state.run.time - 600) / 1500);
+    if (enemy.skillCooldown <= 0 && distanceToPlayer > 120) {
+      for (let index = 0; index < 4; index += 1) {
+        const direction = fromAngle(Math.atan2(toPlayer.y, toPlayer.x) + (index - 1.5) * 0.18);
+        projectiles.push({
+          id: `ep-${localNextId}`,
+          source: "enemy",
+          position: add(enemy.position, scale(direction, enemy.radius + 12)),
+          velocity: scale(direction, 250 + pressure * 32),
+          radius: 7,
+          life: 3.4 * PROJECTILE_LIFE_GLOBAL_SCALE,
+          damage: 17 + pressure * 3,
+          color: 0xb46bff,
+          pierceLeft: 0,
+          obstaclePierceLeft: 1,
+          explosiveRadius: 0,
+          ricochetLeft: 1,
+          obstacleRicochets: 0,
+          catacombBonusSpent: false,
+          homingStrength: 0.05,
+          damageChannel: "ranged"
+        });
+        localNextId += 1;
+      }
+      enemy.skillCooldown = Math.max(1.55, 2.8 - pressure * 0.35);
+      screenFlash = Math.max(screenFlash, 0.24);
+    }
+
+    if (enemy.secondaryCooldown <= 0) {
+      const target = state.run.antiCamp.activeUntil > 0 ? state.run.antiCamp.anchor : state.run.player.position;
+      const wallAngle = Math.atan2(enemy.position.y - target.y, enemy.position.x - target.x) + Math.PI / 2;
+      for (let index = 0; index < 5; index += 1) {
+        const offset = (index - 2) * 34;
+        const wallPosition = add(target, scale(fromAngle(wallAngle), offset));
+        nextObstacles = [
+          ...nextObstacles,
+          {
+            id: `rift-wall-${localNextId}`,
+            chunkKey: "__rift",
+            position: wallPosition,
+            radius: 24,
+            kind: "rift-wall",
+            color: 0xb46bff,
+            projectileResponse: "block",
+            ttl: 4.8
+          }
+        ];
+        localNextId += 1;
+      }
+      hazards.push({
+        id: `h-rift-${localNextId}`,
+        position: { ...target },
+        radius: state.run.antiCamp.activeUntil > 0 ? 76 : 58,
+        damagePerSecond: 48 + pressure * 8,
+        active: false,
+        telegraphTime: 1.15,
+        duration: 2.25,
+        source: "boss"
+      });
+      localNextId += 1;
+      enemy.secondaryCooldown = Math.max(4.2, 6.9 - pressure * 0.55);
+      screenFlash = Math.max(screenFlash, 0.52);
+    }
+  }
+
+  return { nextId: localNextId, obstacles: nextObstacles, screenFlash };
 }
 
 function maybeOfferPendingBossReward(state: SimulationState): SimulationState {
@@ -1143,6 +1446,10 @@ function maybeOfferPendingBossReward(state: SimulationState): SimulationState {
   }
 
   let offeredUpgrades = rollUpgrades(state, offerSource);
+  if (offerSource === "boss-legendary" && offeredUpgrades.length < 3) {
+    const fallback = rollUpgrades(state, "boss-epic").filter((id) => !offeredUpgrades.includes(id));
+    offeredUpgrades = [...offeredUpgrades, ...fallback].slice(0, 3);
+  }
   if (offeredUpgrades.length === 0) {
     offeredUpgrades = rollUpgrades(state, "level-up");
   }
@@ -1169,6 +1476,8 @@ function maybeOfferPendingBossReward(state: SimulationState): SimulationState {
       bossRewardChest: {
         ...state.run.bossRewardChest,
         active: false,
+        claimed: true,
+        openedAt: state.run.time,
         rewardType: null
       },
       tutorialHint: legendaryReady
@@ -1202,7 +1511,9 @@ function maybeOpenBossRewardChest(state: SimulationState): SimulationState {
       ...state.run,
       bossRewardChest: {
         ...state.run.bossRewardChest,
-        active: false
+        active: false,
+        claimed: true,
+        openedAt: state.run.time
       }
     }
   });
@@ -1282,6 +1593,64 @@ function advanceProjectileMotion(
     return null;
   }
   return nextProjectile;
+}
+
+function getPlayerImpactEffectKind(
+  state: SimulationState,
+  weaponId: WeaponId,
+  projectile: ProjectileState,
+  killedTarget: boolean
+): HitEffectState["kind"] {
+  const lastUpgrade = state.run.appliedUpgrades[state.run.appliedUpgrades.length - 1];
+  const latestFamily = lastUpgrade ? getUpgradeVisualFamily(lastUpgrade) : null;
+  const family = state.run.dominantBranch ? getBranchVisual(state.run.dominantBranch).family : latestFamily;
+
+  if (family === "barrage" && (killedTarget || state.run.player.killBurst)) {
+    return "barrage-chain";
+  }
+  if (family === "cannon" && (projectile.pierceLeft > 0 || projectile.radius >= 9 || weaponId === "shard-lance")) {
+    return "cannon-shock";
+  }
+  if (family === "scout" && projectile.homingStrength > 0) {
+    return "scout-pulse";
+  }
+  if (family === "economy" && state.run.appliedUpgrades.includes("bank-heist")) {
+    return "economy-glint";
+  }
+  if (state.run.activeSynergies.length > 0 && killedTarget) {
+    return "synergy-flare";
+  }
+  if (projectile.pierceLeft > 0 || weaponId === "shard-lance") {
+    return "pierce-trail";
+  }
+  if (weaponId === "nova-driver") {
+    return "burst";
+  }
+  return "spark";
+}
+
+function getImpactEffectTtl(kind: HitEffectState["kind"], weaponId: WeaponId, projectile: ProjectileState): number {
+  if (kind === "barrage-chain") {
+    return 0.26;
+  }
+  if (kind === "cannon-shock") {
+    return 0.25;
+  }
+  if (kind === "scout-pulse" || kind === "economy-glint") {
+    return 0.22;
+  }
+  return projectile.pierceLeft > 0 ? 0.2 : weaponId === "nova-driver" ? 0.24 : weaponId === "shard-lance" ? 0.18 : 0.14;
+}
+
+function isShieldGuardFrontHit(enemy: EnemyState, projectile: ProjectileState): boolean {
+  if (enemy.type !== "shield-guard" || projectile.source !== "player") {
+    return false;
+  }
+  const facing = normalize(enemy.shieldFacing ?? { x: 1, y: 0 });
+  const incomingFrom = normalize(subtract(projectile.position, enemy.position));
+  const dot = facing.x * incomingFrom.x + facing.y * incomingFrom.y;
+  const arc = enemy.shieldArc ?? Math.PI * 0.72;
+  return dot > Math.cos(arc * 0.5);
 }
 
 function updateProjectiles(state: SimulationState, deltaSeconds: number): SimulationState {
@@ -1387,7 +1756,28 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
           collided = true;
           const hazardAmplifier =
             state.run.appliedUpgrades.includes("fracture-grid") && isEnemyInsideHazard(enemy, state.run.hazards) ? 1.14 : 1;
-          let hitDamage = nextProjectile.damage * hazardAmplifier;
+          const scoutProgress = state.run.branchProgress?.scout ?? 0;
+          const scoutMarkAmplifier =
+            scoutProgress >= 2.5 && distance(enemy.position, state.run.player.position) <= state.run.player.visionRadius
+              ? 1 + Math.min(0.16, scoutProgress * 0.018)
+              : 1;
+          let hitDamage = nextProjectile.damage * hazardAmplifier * scoutMarkAmplifier;
+          if (enemy.type === "boss" && (enemy.bossSpawnProtectionUntil ?? 0) > state.run.time) {
+            hitDamage *= 0.28;
+            screenFlash = Math.max(screenFlash, 0.18);
+          }
+          if (isShieldGuardFrontHit(enemy, nextProjectile)) {
+            hitDamage *= 1 - (enemy.shieldDamageReduction ?? 0.82);
+            screenFlash = Math.max(screenFlash, 0.12);
+            pushHitEffect(hitEffects, nextId, {
+              position: { ...nextProjectile.position },
+              color: 0x9ee7ff,
+              weaponId: getWeaponIdByColor(nextProjectile.color),
+              kind: "barrier-block",
+              ttl: 0.16
+            });
+            nextId += 1;
+          }
           if (
             state.run.appliedUpgrades.includes("catacomb-rounds") &&
             (nextProjectile.obstacleRicochets ?? 0) > 0 &&
@@ -1399,21 +1789,25 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
           const nextEnemy = { ...enemy, hp: enemy.hp - hitDamage };
           const weaponId = getWeaponIdByColor(nextProjectile.color);
           healed += hitDamage * state.run.player.lifeSteal;
+          const impactKind = getPlayerImpactEffectKind(state, weaponId, nextProjectile, nextEnemy.hp <= 0);
           pushHitEffect(hitEffects, nextId, {
             position: { ...nextProjectile.position },
             color: nextProjectile.color,
             weaponId,
-            kind:
-              nextProjectile.pierceLeft > 0
-                ? "pierce-trail"
-                : weaponId === "nova-driver"
-                  ? "burst"
-                  : weaponId === "shard-lance"
-                    ? "pierce-trail"
-                    : "spark",
-            ttl: nextProjectile.pierceLeft > 0 ? 0.2 : weaponId === "nova-driver" ? 0.24 : weaponId === "shard-lance" ? 0.18 : 0.14
+            kind: impactKind,
+            ttl: getImpactEffectTtl(impactKind, weaponId, nextProjectile)
           });
           nextId += 1;
+          if (scoutMarkAmplifier > 1) {
+            pushHitEffect(hitEffects, nextId, {
+              position: { ...enemy.position },
+              color: 0xf9f871,
+              weaponId,
+              kind: "scout-pulse",
+              ttl: 0.2
+            });
+            nextId += 1;
+          }
 
           if (nextProjectile.explosiveRadius > 0) {
             enemies = applyExplosionDamage(enemies, nextProjectile.position, nextProjectile.explosiveRadius, hitDamage * 0.4, enemy.id);
@@ -1431,7 +1825,14 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
           if (nextEnemy.hp <= 0) {
             const definition = enemyDefinitions[enemy.type];
             const shardBurst = enemy.modifier === "volatile" ? 1.35 : 1;
-            shards.push(createShard(nextId, enemy.position, definition.shardDrop * shardBurst, definition.xp));
+            shards.push(
+              createShard(
+                nextId,
+                enemy.position,
+                definition.shardDrop * shardBurst,
+                enemy.type === "boss" ? Math.round(definition.xp * 0.38) : definition.xp
+              )
+            );
             if (state.run.player.killBurst) {
               const burst = createKillBurstProjectiles(nextId + spawnedProjectiles.length, enemy.position, nextProjectile.color, hitDamage * 0.38);
               spawnedProjectiles.push(...burst);
@@ -1550,10 +1951,10 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
         }
         screenFlash = Math.max(screenFlash, 0.18);
       } else if (distance(nextProjectile.position, state.run.player.position) <= nextProjectile.radius + state.run.player.radius) {
-        if (isApexSanctuaryInvulnerable(state)) {
+        if (isPlayerInvulnerable(state)) {
           screenFlash = Math.max(screenFlash, 0.22);
         } else {
-          const damageResult = applyIncomingDamage(shield, hp, nextProjectile.damage * (1 - clamp(state.run.player.damageReduction, 0, 0.6)));
+          const damageResult = applyIncomingDamage(shield, hp, nextProjectile.damage * (1 - getEffectiveDamageReduction(state)));
           if (state.run.player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
             skillCooldown = 14;
             skillEffectTimer = 4.5;
@@ -1561,7 +1962,8 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
           }
           shield = damageResult.shield;
           hp = damageResult.hp;
-          lastDamageSource = "被远程火力压垮";
+          lastDamageSource =
+            nextProjectile.color === 0x7cc7ff ? "被盾牌守卫的压制弹命中，护盾被打穿" : "被远程火力压垮";
           regenDelay = 4;
           screenFlash = 1;
         }
@@ -1593,7 +1995,14 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
     }
     const definition = enemyDefinitions[enemy.type];
     const wasBoss = enemy.type === "boss";
-    shards.push(createShard(nextId, enemy.position, definition.shardDrop, definition.xp));
+    shards.push(
+      createShard(
+        nextId,
+        enemy.position,
+        definition.shardDrop,
+        wasBoss ? Math.round(definition.xp * 0.38) : definition.xp
+      )
+    );
     nextId += 1;
     banked += Math.round(definition.shardDrop * 0.15);
     unbanked += definition.shardDrop;
@@ -1660,6 +2069,7 @@ function updateProjectiles(state: SimulationState, deltaSeconds: number): Simula
         defeatedBossCount > 0 && defeatedBoss
           ? {
               active: true,
+              claimed: false,
               position: { ...defeatedBoss.position },
               radius: 54,
               rewardType: pendingBossReward
@@ -1679,6 +2089,7 @@ function updateShards(state: SimulationState, deltaSeconds: number): SimulationS
   let banked = state.run.bankedShards;
   let screenFlash = state.run.screenFlash;
   const salvageNet = state.run.appliedUpgrades.includes("salvage-net");
+  const scoutEconomy = state.run.activeSynergies.includes("scout-economy");
 
   const shards = state.run.shards.flatMap((shard) => {
     const toPlayer = subtract(state.run.player.position, shard.position);
@@ -1692,11 +2103,12 @@ function updateShards(state: SimulationState, deltaSeconds: number): SimulationS
     };
 
     if (distance(nextShard.position, state.run.player.position) <= shard.radius + state.run.player.radius + 4) {
-      xp += shard.xpValue * state.run.player.xpMultiplier;
+      const xpMultiplier = Math.min(state.run.player.xpMultiplier, state.run.time >= 360 ? 1.9 : 2.25);
+      xp += shard.xpValue * xpMultiplier * (scoutEconomy ? 1.04 : 1);
       unbanked += shard.value;
-      banked += Math.round(shard.value * 0.12 * state.run.player.economyMultiplier);
-      if (salvageNet) {
-        screenFlash = Math.max(screenFlash, 0.14);
+      banked += Math.round(shard.value * 0.12 * state.run.player.economyMultiplier * (scoutEconomy ? 1.18 : 1));
+      if (salvageNet || scoutEconomy) {
+        screenFlash = Math.max(screenFlash, scoutEconomy ? 0.18 : 0.14);
       }
       return [];
     }
@@ -1741,8 +2153,12 @@ function updateHazards(state: SimulationState, deltaSeconds: number): Simulation
 
     if (nextHazard.active && pointInHazard(state.run.player.position, state.run.player.radius, nextHazard)) {
       const damageScale = nextHazard.source === "boss" ? 1.2 : 1;
-      if (!isApexSanctuaryInvulnerable(state)) {
-        const damageResult = applyIncomingDamage(shield, hp, nextHazard.damagePerSecond * deltaSeconds * damageScale);
+      if (!isPlayerInvulnerable(state)) {
+        const damageResult = applyIncomingDamage(
+          shield,
+          hp,
+          nextHazard.damagePerSecond * deltaSeconds * damageScale * (1 - getEffectiveDamageReduction(state))
+        );
         if (state.run.player.characterSkillId === "overdrive-core" && damageResult.hp < hp && skillCooldown <= 0) {
           skillCooldown = 14;
           skillEffectTimer = 4.5;
@@ -1831,15 +2247,20 @@ function updateExtraction(state: SimulationState, deltaSeconds: number, input: I
 
 function maybeTriggerBossEvent(state: SimulationState): SimulationState {
   const bossActive = state.run.enemies.some((enemy) => enemy.type === "boss");
-  if (state.run.objective.stage >= 9) {
-    return state;
-  }
-  const nextSpawnTime = 30 + state.run.bossSpawnCount * 60;
-  if (bossActive || state.run.time < nextSpawnTime) {
+  const nextTimeBossAt = state.run.nextTimeBossAt ?? 30;
+  const bossCooldownUntil = state.run.bossCooldownUntil ?? 0;
+  if (bossActive || state.run.time < nextTimeBossAt || state.run.time < bossCooldownUntil) {
     return state;
   }
 
   const patternRoll = randomFloat(state.rngSeed);
+  const bossPattern: BossPattern =
+    state.run.time >= 540 && (patternRoll.value > 0.72 || state.run.antiCamp.activeUntil > 0)
+      ? "rift-warden"
+      : patternRoll.value > 0.5
+        ? "artillery"
+        : "charger";
+  const bossName = bossPattern === "rift-warden" ? "裂隙封锁者" : "同事复制体";
   let next: SimulationState = {
     ...state,
     nextId: state.nextId + 1,
@@ -1848,23 +2269,37 @@ function maybeTriggerBossEvent(state: SimulationState): SimulationState {
       ...state.run,
       bossEventTriggered: true,
       bossSpawnCount: state.run.bossSpawnCount + 1,
+      timeBossSpawnCount: (state.run.timeBossSpawnCount ?? 0) + 1,
+      nextTimeBossAt: state.run.time + getNextTimeBossDelay(state),
+      bossCooldownUntil: state.run.time + BOSS_GLOBAL_COOLDOWN_SECONDS,
       bossAlertTimer: 5,
       announcement: createAnnouncement(
         state.nextId,
-        "同事复制体入场",
-        patternRoll.value > 0.5
+        `${bossName}入场`,
+        bossPattern === "rift-warden"
+          ? "裂隙封锁者正在扫描固定站位，低移动高射击区域会被裂隙墙和红圈封锁。"
+          : patternRoll.value > 0.5
           ? "技能模型拷出来的炮击型「同事」已锁定本区，立刻脱离收缩红圈。"
           : "技能模型拷出来的冲锋型「同事」已锁定航线，优先横向脱离蓄力线。",
         "boss"
       ),
       tutorialHint:
-        patternRoll.value > 0.5
+        bossPattern === "rift-warden"
+          ? "裂隙封锁者：不要长时间蹲在障碍缝隙里输出，裂隙墙会临时封住安全点。"
+          : patternRoll.value > 0.5
           ? "复制体同事（炮击型）进入战场：离开红圈预警区，别和技能侧生成的假货换命。"
           : "复制体同事（冲锋型）进入战场：侧向位移躲开直线冲撞。",
     }
   };
-  next = spawnBoss(next, patternRoll.value > 0.5 ? "artillery" : "charger");
+  next = spawnBoss(next, bossPattern);
   return next;
+}
+
+function getNextTimeBossDelay(state: SimulationState): number {
+  if (state.run.time >= 600 || state.run.objective.stage >= 9) {
+    return Math.max(34, 56 - Math.min(16, state.run.bossDefeats * 2));
+  }
+  return 60;
 }
 
 function isBossRewardOutstanding(run: SimulationState["run"]): boolean {
@@ -1874,7 +2309,38 @@ function isBossRewardOutstanding(run: SimulationState["run"]): boolean {
   return run.bossRewardChest.active && run.bossRewardChest.rewardType != null;
 }
 
-function maybeOfferLevelUp(state: SimulationState): SimulationState {
+function tickQueuedLevelUp(state: SimulationState, deltaSeconds: number): SimulationState {
+  if (state.run.status !== "running" || !state.run.queuedLevelUpAfterReward) {
+    return state;
+  }
+
+  const queuedLevelUpTimer = Math.max(0, state.run.queuedLevelUpTimer - deltaSeconds);
+  const nextState = {
+    ...state,
+    run: {
+      ...state.run,
+      queuedLevelUpTimer
+    }
+  };
+
+  if (queuedLevelUpTimer > 0) {
+    return nextState;
+  }
+
+  return maybeOfferLevelUp(
+    {
+      ...nextState,
+      run: {
+        ...nextState.run,
+        queuedLevelUpAfterReward: false,
+        queuedLevelUpTimer: 0
+      }
+    },
+    true
+  );
+}
+
+function maybeOfferLevelUp(state: SimulationState, ignoreBossOutstanding = false): SimulationState {
   if (state.run.status !== "running") {
     return state;
   }
@@ -1884,16 +2350,21 @@ function maybeOfferLevelUp(state: SimulationState): SimulationState {
     return state;
   }
 
-  // 副本奖励未结算时不要弹出普通升级，否则同一波会连领两次（先构筑/后宝箱）。
-  if (isBossRewardOutstanding(state.run)) {
+  if (state.run.queuedLevelUpAfterReward && !ignoreBossOutstanding) {
     return state;
   }
 
-  player.xp -= player.xpToNext;
+  // 副本奖励未结算时不要弹出普通升级，否则同一波会连领两次（先构筑/后宝箱）。
+  if (isBossRewardOutstanding(state.run) && !ignoreBossOutstanding) {
+    return state;
+  }
+
+  const overflowXp = Math.max(0, player.xp - player.xpToNext);
   player.xpLevel += 1;
-  player.xpToNext = Math.floor(player.xpToNext * 1.52 + 26);
+  player.xpToNext = getXpToNextForLevel(player.xpLevel);
+  player.xp = Math.min(overflowXp, Math.round(player.xpToNext * 0.68));
   if (state.run.appliedUpgrades.includes("auto-forge")) {
-    player.shield = Math.min(player.maxShield, player.shield + 18);
+    player.shield = Math.min(player.maxShield, player.shield + 26);
   }
 
   return {
@@ -1903,7 +2374,9 @@ function maybeOfferLevelUp(state: SimulationState): SimulationState {
       status: "level-up",
       player,
       offeredUpgrades: rollUpgrades(state, "level-up"),
-      upgradeOfferSource: "level-up"
+      upgradeOfferSource: "level-up",
+      queuedLevelUpAfterReward: false,
+      queuedLevelUpTimer: 0
     }
   };
 }
@@ -1914,6 +2387,15 @@ function updateObjective(state: SimulationState, deltaSeconds: number): Simulati
   }
 
   const objective = state.run.objective;
+  if (state.run.runMode === "story" && state.run.stageAdvanceLocked) {
+    return {
+      ...state,
+      run: {
+        ...state.run,
+        tutorialHint: STORY_STAGE_ADVANCE_HINT
+      }
+    };
+  }
   const nextFlash = Math.max(0, objective.completionFlash - deltaSeconds);
   const nextProgress = getObjectiveProgress(state, objective);
 
@@ -1983,20 +2465,21 @@ function updateObjective(state: SimulationState, deltaSeconds: number): Simulati
       ...state.run,
       player: {
         ...state.run.player,
-        shield: Math.min(state.run.player.maxShield, state.run.player.shield + 14)
+        shield: Math.min(state.run.player.maxShield, state.run.player.shield + 14),
+        xp: state.run.player.xp + objective.rewardXp
       },
       bankedShards: state.run.bankedShards + objective.rewardShards,
       objective: {
         ...objective,
         progress: objective.target,
         completed: true,
-        completionFlash: state.run.runMode === "story" ? 3.2 : 2.4
+        completionFlash: state.run.runMode === "story" ? 4.2 : 2.4
       },
-      tutorialHint: `${objective.title} 已完成，获得 ${objective.rewardShards} 积分入账。`,
+      tutorialHint: `${objective.title} 已完成，获得 ${objective.rewardShards} 积分与 ${objective.rewardXp} 经验。`,
       announcement: createAnnouncement(
         state.nextId,
         "阶段完成",
-        `${objective.title} 达成 · +${objective.rewardShards} 积分`,
+        `${objective.title} 达成 · +${objective.rewardShards} 积分 · +${objective.rewardXp} 经验`,
         "phase"
       ),
       screenFlash: Math.max(state.run.screenFlash, 0.65)
@@ -2035,7 +2518,7 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
       target,
       progress: 0,
       rewardShards: 15 + cycle * 3,
-      rewardXp: 8 + cycle * 2,
+      rewardXp: 6 + Math.floor(cycle * 1.35),
       baselineTime: state.run.time,
       baselineBankedShards: state.run.bankedShards,
       baselineEnemiesDestroyed: state.run.enemiesDestroyed,
@@ -2056,7 +2539,7 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
       target,
       progress: 0,
       rewardShards: 18 + cycle * 3,
-      rewardXp: 10 + cycle * 2,
+      rewardXp: 7 + Math.floor(cycle * 1.35),
       baselineTime: state.run.time,
       baselineBankedShards: state.run.bankedShards,
       baselineEnemiesDestroyed: state.run.enemiesDestroyed,
@@ -2076,7 +2559,7 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
     target,
     progress: 0,
     rewardShards: 17 + cycle * 4,
-    rewardXp: 12 + cycle * 2,
+    rewardXp: 8 + Math.floor(cycle * 1.35),
     baselineTime: state.run.time,
     baselineBankedShards: state.run.bankedShards,
     baselineEnemiesDestroyed: state.run.enemiesDestroyed,
@@ -2086,12 +2569,14 @@ function createNextObjective(state: SimulationState): RunObjectiveState {
 }
 
 function getThemeForStage(stage: number): RunTheme {
-  const chapter = Math.floor(Math.max(0, stage - 1) / 3) % 3;
-  if (chapter === 1) {
+  if (stage >= 10) {
     return "siege";
   }
-  if (chapter === 2) {
+  if (stage >= 7) {
     return "crossfire";
+  }
+  if (stage >= 4) {
+    return "siege";
   }
   return "skirmish";
 }
@@ -2122,6 +2607,40 @@ function pushHitEffect(
 }
 
 type WeightedUpgrade = UpgradeDefinition & { weight: number };
+
+function getUpgradeStackCount(state: SimulationState, upgradeId: UpgradeId): number {
+  return state.run.upgradeStacks?.[upgradeId] ?? state.run.appliedUpgrades.filter((id) => id === upgradeId).length;
+}
+
+function hasUpgrade(state: SimulationState, upgradeId: UpgradeId): boolean {
+  return getUpgradeStackCount(state, upgradeId) > 0;
+}
+
+function isRouteNearCapstone(state: SimulationState, branch: UpgradeBranch): boolean {
+  return (state.run.branchProgress?.[branch] ?? 0) >= 6.4 || (state.run.bossDefeats >= 3 && (state.run.branchProgress?.[branch] ?? 0) >= 4.6);
+}
+
+function isUpgradePrereqSatisfied(
+  state: SimulationState,
+  upgrade: UpgradeDefinition,
+  source: UpgradeOfferSource,
+  relaxEpicParents: boolean
+): boolean {
+  const meta = upgradeTreeMeta[upgrade.id];
+  const required = meta.comboRequires ?? meta.parents;
+  if (!required || required.every((parentId) => hasUpgrade(state, parentId))) {
+    return true;
+  }
+
+  const role = getUpgradeRole(upgrade.id);
+  const mayRelax =
+    relaxEpicParents &&
+    source !== "level-up" &&
+    (role === "combo" || role === "capstone") &&
+    (upgrade.rarity === "epic" || upgrade.rarity === "legendary" || upgrade.rarity === "mythic");
+  const orbitStrict = upgrade.id === "orbit-plate-2" || upgrade.id === "orbit-plate-3";
+  return mayRelax && !orbitStrict;
+}
 
 function pickWeightedUpgrade(entries: WeightedUpgrade[], seed: number): { id: UpgradeId; seed: number } {
   if (entries.length === 0) {
@@ -2154,11 +2673,12 @@ function removeUpgradeById(available: WeightedUpgrade[], id: UpgradeId): void {
 
 function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): UpgradeId[] {
   let seed = state.rngSeed;
+  const dominantBranch = state.run.dominantBranch;
 
   const buildPool = (relaxEpicParents: boolean): WeightedUpgrade[] =>
     upgradePool
       .filter((upgrade) => {
-        if (upgrade.once && state.run.appliedUpgrades.includes(upgrade.id)) {
+        if (getUpgradeStackCount(state, upgrade.id) >= getUpgradeMaxStacks(upgrade.id)) {
           return false;
         }
         if (upgrade.id === "compound-interest" && !state.meta.unlockedUpgradeIds.includes("compound-interest")) {
@@ -2167,17 +2687,22 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
         if (upgrade.id === "fracture-grid" && state.run.hazards.length === 0) {
           return false;
         }
+        if (!isUpgradePrereqSatisfied(state, upgrade, source, relaxEpicParents)) {
+          return false;
+        }
+        const role = getUpgradeRole(upgrade.id);
         const meta = upgradeTreeMeta[upgrade.id];
-        if (meta.parents && !meta.parents.every((parentId) => state.run.appliedUpgrades.includes(parentId))) {
-          // 副本池放宽 epic+ 前置时，仍禁止「环轨盾阵」跨阶直选（否则会一次拿到 2/3 面盾）。
-          const relaxTier =
-            relaxEpicParents &&
-            (upgrade.rarity === "epic" || upgrade.rarity === "legendary" || upgrade.rarity === "mythic");
-          const orbitStrict =
-            upgrade.id === "orbit-plate-2" || upgrade.id === "orbit-plate-3";
-          if (!relaxTier || orbitStrict) {
-            return false;
-          }
+        if (source === "level-up" && role === "capstone" && upgrade.rarity !== "mythic") {
+          return false;
+        }
+        if (source === "level-up" && role === "capstone" && !isRouteNearCapstone(state, meta.branch)) {
+          return false;
+        }
+        if (role === "combo" && source === "level-up" && meta.tier >= 3 && (state.run.branchProgress?.[meta.branch] ?? 0) < 3.6) {
+          return false;
+        }
+        if (role === "capstone" && source !== "boss-legendary" && !isRouteNearCapstone(state, meta.branch)) {
+          return false;
         }
         if (source === "boss-epic" && upgrade.rarity === "common") {
           return false;
@@ -2196,14 +2721,35 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
       })
       .map((upgrade) => {
         const meta = upgradeTreeMeta[upgrade.id];
-        const sameBranchCount = state.run.appliedUpgrades.filter((upgradeId) => upgradeTreeMeta[upgradeId]?.branch === meta.branch).length;
-        // 弱线路堆叠：避免「一路走到黑」压死其它分支，便于看到更多不同技能
-        const branchStackBias = 1 + Math.min(0.22, sameBranchCount * 0.065);
-        // 本局尚未点过该分支时略抬高，鼓励尝鲜
-        const freshBranchBias = sameBranchCount === 0 ? 1.14 : 1;
-        const branchBias = branchStackBias * freshBranchBias;
+        const branchProgress = state.run.branchProgress?.[meta.branch] ?? 0;
+        const role = getUpgradeRole(upgrade.id);
+        const sameDominantBranch = dominantBranch != null && meta.branch === dominantBranch;
+        const branchBias =
+          meta.branch === "core"
+            ? 1.08
+            : sameDominantBranch
+              ? 1.34 + Math.min(0.24, branchProgress * 0.03)
+              : branchProgress > 0
+                ? 1.12
+                : 0.82;
+        const roleBias =
+          source === "level-up"
+            ? role === "piece"
+              ? 1.08
+              : role === "engine"
+                ? 1.08
+                : role === "combo"
+                   ? 0.78 + Math.min(0.32, branchProgress * 0.06)
+                  : 0.18
+            : role === "capstone"
+              ? 2.2
+              : role === "combo"
+                ? 1.72
+                : role === "engine"
+                  ? 1.2
+                  : 0.82;
         // 阶位与阶段略松绑，减少「永远先看到同一档」的体感
-        const stageBias = state.run.objective.stage >= meta.tier * 2 ? 1.06 : 0.94;
+        const stageBias = state.run.objective.stage >= meta.tier * 3 ? 1.08 : 0.78;
         const rarityBias =
           source === "level-up"
             ? upgrade.rarity === "mythic"
@@ -2225,7 +2771,7 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
         const bossDefeatBias = source === "level-up" ? 1 + Math.min(0.14, state.run.bossDefeats * 0.035) : 1;
         return {
           ...upgrade,
-          weight: upgrade.weight * branchBias * stageBias * rarityBias * bossDefeatBias
+          weight: upgrade.weight * branchBias * roleBias * stageBias * rarityBias * bossDefeatBias
         };
       });
 
@@ -2247,9 +2793,24 @@ function rollUpgrades(state: SimulationState, source: UpgradeOfferSource): Upgra
   const selections: UpgradeId[] = [];
 
   if (source === "boss-epic") {
-    const epicPlus = available.filter((u) => u.rarity === "epic" || u.rarity === "legendary");
+    const routeHigh = available.filter((u) => {
+      const meta = upgradeTreeMeta[u.id];
+      const role = getUpgradeRole(u.id);
+      return meta.branch === dominantBranch && (role === "combo" || role === "capstone" || u.rarity === "epic" || u.rarity === "legendary");
+    });
+    const epicPlus = routeHigh.length > 0 ? routeHigh : available.filter((u) => u.rarity === "epic" || u.rarity === "legendary");
     if (epicPlus.length > 0) {
       const pick = pickWeightedUpgrade(epicPlus, seed);
+      seed = pick.seed;
+      selections.push(pick.id);
+      removeUpgradeById(available, pick.id);
+    }
+  }
+
+  if (source === "boss-legendary" && dominantBranch != null) {
+    const routeLegendary = available.filter((u) => upgradeTreeMeta[u.id].branch === dominantBranch);
+    if (routeLegendary.length > 0) {
+      const pick = pickWeightedUpgrade(routeLegendary, seed);
       seed = pick.seed;
       selections.push(pick.id);
       removeUpgradeById(available, pick.id);
@@ -2373,10 +2934,14 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
     .slice(-4)
     .map((upgradeId) => upgradeDefinitions[upgradeId]?.title)
     .filter((title): title is string => Boolean(title));
+  const dominantBuild = state.run.dominantBranch ? getBranchVisual(state.run.dominantBranch).label : "未形成主流派";
+  const synergyText =
+    state.run.activeSynergies.length > 0 ? ` · 协同：${state.run.activeSynergies.map(getSynergyLabel).join(" / ")}` : "";
+  const buildPrefix = `武器 Lv.${state.run.player.weaponLevel} · ${dominantBuild}${synergyText}${state.run.riskProtocolTier > 0 ? " · 风险协议已启用" : ""}`;
   const buildRecap =
     keyUpgradeTitles.length > 0
-      ? `武器 Lv.${state.run.player.weaponLevel}${state.run.riskProtocolTier > 0 ? " · 风险协议已启用" : ""} · 关键升级：${keyUpgradeTitles.join(" / ")}`
-      : `武器 Lv.${state.run.player.weaponLevel}${state.run.riskProtocolTier > 0 ? " · 风险协议已启用" : ""} · 本轮主要依靠基础火力推进`;
+      ? `${buildPrefix} · 关键升级：${keyUpgradeTitles.join(" / ")}`
+      : `${buildPrefix} · 本轮主要依靠基础火力推进`;
   const deathReason =
     result === "extracted"
       ? "成功撤离，结算完成"
@@ -2405,13 +2970,15 @@ function endRun(state: SimulationState, result: RunSummary["result"]): Simulatio
   const armoryMarksGain =
     result === "cleared"
       ? 1
-      : result === "extracted" && state.run.runMode === "story" && summary.highestStage >= STORY_FINAL_STAGE
+      : result === "extracted" &&
+          ((state.run.runMode === "story" && summary.highestStage >= STORY_FINAL_STAGE) ||
+            (state.run.runMode === "infinite" && (summary.duration >= 480 || summary.highestStage >= STORY_FINAL_STAGE)))
         ? 1
         : 0;
   const leaderboardEntry = {
     id: `lb-${state.nextId}-${Math.floor(state.run.time)}`,
     recordedAt: Date.now(),
-    playerName: "鏈湴璁板綍",
+    playerName: "本地记录",
     weaponId: state.run.player.weaponId,
     score: summary.shardsBanked,
     result,
@@ -2667,14 +3234,16 @@ function maybeFlushPendingStageLore(state: SimulationState): SimulationState {
     run: {
       ...state.run,
       stageLore: { stage: head.stage },
-      pendingStageLoreQueue: rest
+      pendingStageLoreQueue: rest,
+      stageAdvanceLocked: true,
+      stageReadyToAdvance: true
     }
   };
 }
 
 function attachStoryStageLore(next: SimulationState): SimulationState {
   if (next.run.runMode !== "story") {
-    return { ...next, run: { ...next.run, stageLore: null, pendingStageLoreQueue: [] } };
+    return { ...next, run: { ...next.run, stageLore: null, pendingStageLoreQueue: [], stageAdvanceLocked: false, stageReadyToAdvance: false } };
   }
   const stage = next.run.objective.stage;
   const prevQueue = next.run.pendingStageLoreQueue ?? [];
@@ -2685,7 +3254,10 @@ function attachStoryStageLore(next: SimulationState): SimulationState {
       run: {
         ...next.run,
         stageLore: null,
-        pendingStageLoreQueue: [...prevQueue, { stage }]
+        pendingStageLoreQueue: prevQueue.length > 0 ? prevQueue : [{ stage }],
+        stageAdvanceLocked: true,
+        stageReadyToAdvance: true,
+        tutorialHint: STORY_STAGE_ADVANCE_HINT
       }
     };
   }
@@ -2697,7 +3269,9 @@ function attachStoryStageLore(next: SimulationState): SimulationState {
     run: {
       ...next.run,
       stageLore: { stage: head.stage },
-      pendingStageLoreQueue: rest
+      pendingStageLoreQueue: rest,
+      stageAdvanceLocked: true,
+      stageReadyToAdvance: true
     }
   };
 }
@@ -2784,6 +3358,9 @@ function advanceStage(state: SimulationState): SimulationState {
         run: {
           ...next.run,
           bossSpawnCount: Math.max(next.run.bossSpawnCount, 1),
+          stageBossSpawnCount: (next.run.stageBossSpawnCount ?? 0) + 1,
+          bossCooldownUntil: next.run.time + BOSS_GLOBAL_COOLDOWN_SECONDS,
+          nextTimeBossAt: Math.max(next.run.nextTimeBossAt ?? 30, next.run.time + getNextTimeBossDelay(next)),
           bossAlertTimer: Math.max(next.run.bossAlertTimer, 6),
           announcement: createAnnouncement(
             next.nextId,
@@ -2857,6 +3434,9 @@ function triggerStageBoss(state: SimulationState): SimulationState {
     run: {
       ...state.run,
       bossSpawnCount: Math.max(state.run.bossSpawnCount, 1) + 1,
+      stageBossSpawnCount: (state.run.stageBossSpawnCount ?? 0) + 1,
+      bossCooldownUntil: state.run.time + BOSS_GLOBAL_COOLDOWN_SECONDS,
+      nextTimeBossAt: Math.max(state.run.nextTimeBossAt ?? 30, state.run.time + getNextTimeBossDelay(state)),
       bossAlertTimer: 6,
       announcement: createAnnouncement(
         state.nextId,
@@ -2894,7 +3474,7 @@ function triggerStageBoss(state: SimulationState): SimulationState {
 
   const pattern = state.run.stageTheme === "crossfire" ? "artillery" : "charger";
   next = spawnBoss(next, pattern, {
-    hpMultiplier: 1.42,
+    hpMultiplier: 2.15,
     radiusMultiplier: 1.18,
     colorOverride: 0xff2f45
   });
@@ -2935,6 +3515,24 @@ function isApexSanctuaryInvulnerable(state: SimulationState): boolean {
   return (
     state.run.appliedUpgrades.includes("apex-sanctuary") && (state.run.player.apexInvulnRemaining ?? 0) > 0
   );
+}
+
+function isDashInvulnerable(state: SimulationState): boolean {
+  const dashState = state.run.player.dashState;
+  if (!dashState) {
+    return false;
+  }
+  const elapsed = dashState.duration - dashState.remaining;
+  return elapsed >= 0.015 && dashState.remaining > 0.025;
+}
+
+function isPlayerInvulnerable(state: SimulationState): boolean {
+  return isApexSanctuaryInvulnerable(state) || isDashInvulnerable(state);
+}
+
+function getEffectiveDamageReduction(state: SimulationState): number {
+  const synergyBonus = state.run.activeSynergies.includes("survival-barrier") && state.run.player.shield > 0 ? 0.08 : 0;
+  return clamp(state.run.player.damageReduction + synergyBonus, 0, 0.68);
 }
 
 function applyIncomingDamage(shield: number, hp: number, damage: number): { shield: number; hp: number } {
@@ -3033,4 +3631,3 @@ function collectChunkKeys(center: Vec2, chunkSize: number, radius: number): stri
 
   return chunkKeys;
 }
-

@@ -1,6 +1,6 @@
 import type { EliteModifier, EnemyType } from "../content/enemies";
 import type { CharacterSkillId } from "../content/skills";
-import type { UpgradeId } from "../content/upgrades";
+import type { UpgradeBranch, UpgradeId } from "../content/upgrades";
 import type { WeaponId, WeaponModId } from "../content/weapons";
 
 export type Vec2 = {
@@ -23,6 +23,13 @@ export type PlayerState = {
   dashCooldown: number;
   dashTimer: number;
   dashDistance: number;
+  dashState: null | {
+    direction: Vec2;
+    remaining: number;
+    duration: number;
+    speed: number;
+    phaseBurstFired: boolean;
+  };
   weaponId: WeaponId;
   weaponLevel: number;
   weaponCooldown: number;
@@ -59,7 +66,7 @@ export type PlayerState = {
   apexPulseCooldown: number;
 };
 
-export type BossPattern = "artillery" | "charger" | "laser-prime";
+export type BossPattern = "artillery" | "charger" | "laser-prime" | "rift-warden";
 
 export type HazardShape = "circle" | "beam-v" | "beam-h";
 
@@ -80,6 +87,10 @@ export type EnemyState = {
   chargeDirection: Vec2;
   touchCooldown: number;
   color: number;
+  shieldFacing?: Vec2;
+  shieldArc?: number;
+  shieldDamageReduction?: number;
+  bossSpawnProtectionUntil?: number;
   /** 终幕复写体（laser-prime）：用你的航迹合成的镜像，交替纵/横激光栅格 */
   bossLaserPhase?: number;
 };
@@ -135,9 +146,23 @@ export type HitEffectState = {
   position: Vec2;
   color: number;
   weaponId: WeaponId;
-  kind: "spark" | "burst" | "pierce-trail" | "ricochet-flash" | "heal-glint" | "barrier-block";
+  kind:
+    | "spark"
+    | "burst"
+    | "pierce-trail"
+    | "ricochet-flash"
+    | "heal-glint"
+    | "barrier-block"
+    | "barrage-chain"
+    | "cannon-shock"
+    | "scout-pulse"
+    | "economy-glint"
+    | "synergy-flare"
+    | "rift-spark";
   ttl: number;
 };
+
+export type BuildSynergyId = "barrage-cannon" | "survival-barrier" | "scout-economy" | "mobility-barrage";
 
 export type RunAnnouncement = {
   id: string;
@@ -155,9 +180,10 @@ export type ObstacleState = {
   chunkKey: string;
   position: Vec2;
   radius: number;
-  kind: "rock" | "crystal" | "pillar";
+  kind: "rock" | "crystal" | "pillar" | "rift-wall";
   color: number;
   projectileResponse: "block" | "reflect";
+  ttl?: number;
 };
 
 export type ExtractionState = {
@@ -172,9 +198,11 @@ export type ExtractionState = {
 
 export type BossRewardChestState = {
   active: boolean;
+  claimed: boolean;
   position: Vec2;
   radius: number;
   rewardType: Exclude<UpgradeOfferSource, "level-up"> | null;
+  openedAt?: number;
 };
 
 export type RunObjectiveKind = "collect-shards" | "defeat-enemies" | "survive";
@@ -310,9 +338,26 @@ export type RunState = {
   offeredUpgrades: UpgradeId[];
   upgradeOfferSource: UpgradeOfferSource;
   appliedUpgrades: UpgradeId[];
+  upgradeStacks: Partial<Record<UpgradeId, number>>;
+  branchProgress: Partial<Record<UpgradeBranch, number>>;
+  dominantBranch: UpgradeBranch | null;
+  activeSynergies: BuildSynergyId[];
+  antiCamp: {
+    anchor: Vec2;
+    lowMoveTime: number;
+    shotHeat: number;
+    obstacleDensity: number;
+    activeUntil: number;
+  };
+  queuedLevelUpAfterReward: boolean;
+  queuedLevelUpTimer: number;
   activeHazardTier: number;
   bossEventTriggered: boolean;
   bossSpawnCount: number;
+  timeBossSpawnCount: number;
+  stageBossSpawnCount: number;
+  nextTimeBossAt: number;
+  bossCooldownUntil: number;
   bossDefeats: number;
   bossLegendaryCharge: number;
   pendingBossReward: Exclude<UpgradeOfferSource, "level-up"> | null;
@@ -331,6 +376,10 @@ export type RunState = {
   stageLore: null | { stage: number };
   /** 因场上 Boss 而顺延的阶段叙事，Boss 离场后按 FIFO 补播（仅 story） */
   pendingStageLoreQueue: Array<{ stage: number }>;
+  /** 故事模式：阶段播报尚未被玩家读完时，暂缓继续完成下一阶段 */
+  stageAdvanceLocked: boolean;
+  /** 故事模式：阶段完成后等待播报/奖励链路结清 */
+  stageReadyToAdvance: boolean;
 };
 
 export type SimulationState = {

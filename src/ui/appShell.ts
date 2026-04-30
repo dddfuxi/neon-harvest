@@ -9,13 +9,24 @@ import {
   setVirtualInteract,
   setVirtualMove
 } from "../game/input/virtualControls";
-import { upgradeBranchLabels, upgradeDefinitions, upgradeTreeMeta, type UpgradeBranch, type UpgradeId } from "../game/content/upgrades";
+import {
+  branchCodexEntries,
+  getBranchVisual,
+  getUpgradeMaxStacks,
+  getUpgradeRole,
+  upgradeBranchLabels,
+  upgradeDefinitions,
+  upgradeTreeMeta,
+  type UpgradeBranch,
+  type UpgradeId
+} from "../game/content/upgrades";
 import { weaponDefinitions, type WeaponId } from "../game/content/weapons";
 import { type UiCommand } from "../game/simulation/engine";
 import { armoryMarksCostForMod, metaUpgrades, preRunSupplyDefinitions } from "../game/simulation/meta";
 import { clearPersistedState, loadState, persistState } from "../game/storage/save";
 import {
   STORY_FINAL_STAGE,
+  type BuildSynergyId,
   type LeaderboardEntry,
   type PreRunSupplyId,
   type RunMode,
@@ -39,13 +50,6 @@ const LEGENDARY_CORE_AUTO_REVEAL_MS = 360;
 const LEGENDARY_CARD_ENTRY_MS = 280;
 const LEGENDARY_CARD_STAGGER_MS = 50;
 const LEGENDARY_CHOICES_TAIL_BUFFER_MS = 40;
-
-const categoryMap = {
-  weapon: "武器",
-  survivability: "生存",
-  mobility: "机动",
-  economy: "收益"
-} as const;
 
 const rarityMap = {
   common: "标准",
@@ -694,6 +698,37 @@ function renderExtractionHudStrip(state: SimulationState): string {
   return `<div class="extraction-hud-strip"><span class="label">撤离信标</span><div class="body-copy">已上线 — 前往地图高亮区，长按 <strong>E</strong> / 交互键撤离</div></div>`;
 }
 
+function renderBuildHudStrip(state: SimulationState): string {
+  const branch = state.run.dominantBranch;
+  if (!branch) {
+    return "";
+  }
+  const visual = getBranchVisual(branch);
+  const progress = Math.min(100, Math.round(((state.run.branchProgress?.[branch] ?? 0) / 7) * 100));
+  return `
+    <div class="build-hud-strip ${visual.cssClass}">
+      <span class="label">当前流派</span>
+      <div class="body-copy"><strong>${visual.label}</strong> · ${visual.formedText}</div>
+      ${renderSynergyTags(state)}
+      <div class="progress compact"><span style="width:${progress}%"></span></div>
+    </div>
+  `;
+}
+
+function renderSynergyTags(state: SimulationState): string {
+  const activeSynergies = state.run.activeSynergies ?? [];
+  if (activeSynergies.length === 0) {
+    return "";
+  }
+  const labels: Record<BuildSynergyId, string> = {
+    "barrage-cannon": "火网重炮",
+    "survival-barrier": "稳态盾阵",
+    "scout-economy": "雷达打捞",
+    "mobility-barrage": "游击火网"
+  };
+  return `<div class="synergy-tag-row">${activeSynergies.map((id) => `<span>${labels[id]}</span>`).join("")}</div>`;
+}
+
 function renderHud(container: HTMLElement, state: SimulationState): void {
   if (state.run.status === "menu" || state.run.status === "meta") {
     container.innerHTML = "";
@@ -733,6 +768,7 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
           <div class="body-copy">${characterSkillDefinitions[state.run.player.characterSkillId].name}</div>
         </div>
         ${renderExtractionHudStrip(state)}
+        ${renderBuildHudStrip(state)}
         ${renderEconomyHudStrip(state)}
       </div>
       ${renderStageLoreOverlay(state)}
@@ -742,11 +778,12 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
 
   container.innerHTML = `
     ${announcementMarkup}
+    ${renderExtractionHudStrip(state)}
     <div class="hud-top">
       <div class="hud-cluster">
         ${card("护盾", `${Math.max(0, Math.ceil(state.run.player.shield))}<small> / ${state.run.player.maxShield}</small>`, shieldPercent)}
         ${card("机体", `${Math.max(0, Math.ceil(state.run.player.hp))}<small> / ${state.run.player.maxHp}</small>`, hullPercent)}
-        ${card("冲刺", `${state.run.player.dashTimer <= 0 ? "就绪" : `${state.run.player.dashTimer.toFixed(1)} 秒`}`, dashPercent)}
+        ${card("冲刺", `${state.run.player.dashState ? "无敌帧" : state.run.player.dashTimer <= 0 ? "就绪" : `${state.run.player.dashTimer.toFixed(1)} 秒`}`, dashPercent)}
       </div>
       <div class="hud-cluster">
         ${card("武器", `${weaponDefinitions[state.run.player.weaponId].name}<small> · Lv.${state.run.player.weaponLevel}</small>`, undefined)}
@@ -755,11 +792,11 @@ function renderHud(container: HTMLElement, state: SimulationState): void {
       </div>
     </div>
     <div class="hud-bottom">
-      ${renderExtractionHudStrip(state)}
       <div class="panel status-strip">
         <span class="label">战局状态</span>
         <div><strong>${state.run.extraction.unlocked ? "撤离已开启" : "采集阶段进行中"}</strong></div>
         <div class="body-copy">${state.run.tutorialHint}</div>
+        ${renderBuildHudStrip(state)}
         ${renderEconomyHudStrip(state)}
         <div class="progress"><span style="width:${xpPercent}%"></span></div>
         <div class="body-copy">等级 ${state.run.player.xpLevel}，距离下次升级还差 ${Math.ceil(state.run.player.xpToNext - state.run.player.xp)} 点经验</div>
@@ -959,22 +996,32 @@ function renderModal(
                 ${state.run.offeredUpgrades
                   .map((upgradeId, index) => {
                     const upgrade = upgradeDefinitions[upgradeId];
+                    const meta = upgradeTreeMeta[upgradeId];
+                    const role = getUpgradeRole(upgradeId);
+                    const maxStacks = getUpgradeMaxStacks(upgradeId);
+                    const nextStack = (state.run.upgradeStacks?.[upgradeId] ?? 0) + 1;
+                    const branchVisual = getBranchVisual(meta.branch);
                     const cardStyle = isLegendaryReward
                       ? `--entry-delay:${index * LEGENDARY_CARD_STAGGER_MS}ms`
                       : useUpgradeCardEnterAnimation
                         ? `--enter-stagger:${index * 65}ms`
                         : "";
                     return `
-                      <article class="choice-card rarity-${upgrade.rarity} ${isLegendaryReward ? "legendary-reward-card" : ""} ${firstEncounterIds.includes(upgradeId) ? "choice-card--first-encounter" : ""}"${cardStyle ? ` style="${cardStyle}"` : ""}>
+                      <article class="choice-card rarity-${upgrade.rarity} ${branchVisual.cssClass} role-${role} ${isLegendaryReward ? "legendary-reward-card" : ""} ${firstEncounterIds.includes(upgradeId) ? "choice-card--first-encounter" : ""}"${cardStyle ? ` style="${cardStyle}"` : ""}>
                         <div class="choice-meta">
                           <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
-                          <span class="rarity-type">${categoryMap[upgrade.category]}</span>
+                          <span class="rarity-type">${upgradeBranchLabels[meta.branch]}</span>
+                          <span class="rarity-type">${getUpgradeRoleLabel(role)}</span>
                         </div>
                         <h3>${upgrade.title}</h3>
                         <p>${describeUpgrade(upgrade.id)}</p>
+                        <div class="branch-progress-row">
+                          <span>${branchVisual.label}</span>
+                          <strong>${maxStacks > 1 ? `${nextStack}/${maxStacks} 层` : "单局唯一"}</strong>
+                        </div>
                         <div class="tag-row">${[
                           ...upgrade.tags,
-                          ...(upgrade.once ? ["单局唯一"] : [])
+                          ...(maxStacks > 1 ? [`可叠 ${maxStacks} 层`] : ["单局唯一"])
                         ]
                           .map((tag) => `<span class="tag">${tag}</span>`)
                           .join("")}</div>
@@ -1339,8 +1386,22 @@ function renderSummary(summary: NonNullable<SimulationState["meta"]["lastRunSumm
   `;
 }
 
+function getUpgradeRoleLabel(role: ReturnType<typeof getUpgradeRole>): string {
+  if (role === "capstone") {
+    return "终局件";
+  }
+  if (role === "combo") {
+    return "成型件";
+  }
+  if (role === "engine") {
+    return "核心件";
+  }
+  return "凑牌件";
+}
+
 function describeUpgrade(upgradeId: keyof typeof upgradeDefinitions): string {
-  const repeatable = upgradeDefinitions[upgradeId].once ? "单局只能选一次。" : "可重复获取。";
+  const maxStacks = getUpgradeMaxStacks(upgradeId);
+  const repeatable = maxStacks > 1 ? `可重复获取，最多 ${maxStacks} 层。` : "单局只能选一次。";
 
   const descriptions: Record<keyof typeof upgradeDefinitions, string> = {
     "weapon-tuning": `当前武器等级 +1。每级提高伤害、射速和弹速。${repeatable}`,
@@ -1350,7 +1411,7 @@ function describeUpgrade(upgradeId: keyof typeof upgradeDefinitions): string {
     "phase-cooling": `最大护盾 +20，并立刻恢复 20 点护盾。${repeatable}`,
     "ion-shell": `受到的伤害降低 12%。${repeatable}`,
     "rapid-cycle": `射速 +20%。${repeatable}`,
-    "blink-drive": `冲刺冷却缩短 18%，冲刺距离 +26。${repeatable}`,
+    "blink-drive": `冲刺冷却缩短 18%，冲刺距离 +26；冲刺滑行期间带短暂无敌帧。${repeatable}`,
     "repulsor-fins": `移动速度 +12%，碎片吸附范围 +34。${repeatable}`,
     "salvage-net": `经验获取 +20%；拾取碎片时有轻微屏幕闪烁反馈。${repeatable}`,
     "compound-interest": `局内收益倍率 +18%；获得时立刻将 18 点积分记入已入账池。${repeatable}`,
@@ -1401,7 +1462,7 @@ function renderRunSkillTree(summary: NonNullable<SimulationState["meta"]["lastRu
     `;
   }
 
-  const branchOrder: UpgradeBranch[] = ["core", "barrage", "precision", "survival", "mobility", "economy", "scout"];
+  const branchOrder: UpgradeBranch[] = ["core", "barrage", "precision", "survival", "barrier", "mobility", "economy", "scout"];
   const grouped = branchOrder
     .map((branch) => ({
       branch,
@@ -1449,6 +1510,7 @@ function renderSkillCodex(state: SimulationState, pendingSkillFeedback: Readonly
   const discovered = new Set(state.meta.discoveredUpgradeIds);
   const allSkills = Object.keys(upgradeDefinitions) as Array<keyof typeof upgradeDefinitions>;
   const discoveredCount = allSkills.filter((upgradeId) => discovered.has(upgradeId)).length;
+  const discoveredBranches = getDiscoveredBranches(discovered);
 
   return `
     <div class="panel menu-section">
@@ -1459,14 +1521,16 @@ function renderSkillCodex(state: SimulationState, pendingSkillFeedback: Readonly
             <strong>已收录 ${discoveredCount} / ${allSkills.length}</strong>
           </div>
         </summary>
+        ${renderBranchCodex(discoveredBranches)}
         <div class="skill-codex-grid">
           ${allSkills
             .map((upgradeId) => {
               const unlocked = discovered.has(upgradeId);
               const upgrade = upgradeDefinitions[upgradeId];
               const meta = upgradeTreeMeta[upgradeId];
+              const branchVisual = getBranchVisual(meta.branch);
               return `
-                <article class="meta-card codex-card rarity-${upgrade.rarity} ${unlocked ? "discovered" : "locked"}">
+                <article class="meta-card codex-card rarity-${upgrade.rarity} ${branchVisual.cssClass} ${unlocked ? "discovered" : "locked"}">
                   <div class="choice-meta">
                     <span class="rarity-pill">${rarityMap[upgrade.rarity]}</span>
                     <span class="rarity-type">${upgradeBranchLabels[meta.branch]}</span>
@@ -1482,6 +1546,53 @@ function renderSkillCodex(state: SimulationState, pendingSkillFeedback: Readonly
             .join("")}
         </div>
       </details>
+    </div>
+  `;
+}
+
+function getDiscoveredBranches(discovered: ReadonlySet<UpgradeId>): UpgradeBranch[] {
+  const branches = new Set<UpgradeBranch>();
+  for (const upgradeId of discovered) {
+    const branch = upgradeTreeMeta[upgradeId]?.branch;
+    if (branch) {
+      branches.add(branch);
+    }
+  }
+  return ["barrage", "precision", "survival", "barrier", "mobility", "economy", "scout", "core"].filter((branch) =>
+    branches.has(branch as UpgradeBranch)
+  ) as UpgradeBranch[];
+}
+
+function renderBranchCodex(discoveredBranches: UpgradeBranch[]): string {
+  if (discoveredBranches.length === 0) {
+    return `<p class="body-copy branch-codex-empty">还没有解锁流派。首次在战斗中拿到任意流派技能后，这里会显示该流派的最终效果。</p>`;
+  }
+
+  return `
+    <div class="branch-codex-grid">
+      ${discoveredBranches
+        .map((branch) => {
+          const entry = branchCodexEntries[branch];
+          const visual = getBranchVisual(branch);
+          const keySkills = entry.keyUpgradeIds
+            .map((upgradeId) => upgradeDefinitions[upgradeId]?.title)
+            .filter((title): title is string => Boolean(title))
+            .join(" / ");
+          return `
+            <article class="meta-card branch-codex-card ${visual.cssClass}">
+              <div class="choice-meta">
+                <span class="rarity-pill">流派</span>
+                <span class="rarity-type">${upgradeBranchLabels[branch]}</span>
+              </div>
+              <h3>${visual.label} · 最终形态</h3>
+              <p><strong>特点：</strong>${entry.identity}</p>
+              <p><strong>成型：</strong>${entry.finalEffect}</p>
+              <p><strong>联动：</strong>${entry.synergyHint}</p>
+              <footer>关键牌：${keySkills}</footer>
+            </article>
+          `;
+        })
+        .join("")}
     </div>
   `;
 }

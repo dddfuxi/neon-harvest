@@ -1,4 +1,4 @@
-export type EnemyType = "drone" | "sniper" | "brute" | "boss";
+export type EnemyType = "drone" | "sniper" | "brute" | "shield-guard" | "boss";
 export type EliteModifier = "fast" | "volatile";
 
 export type EnemyDefinition = {
@@ -49,6 +49,18 @@ export const enemyDefinitions: Record<EnemyType, EnemyDefinition> = {
     xp: 26,
     color: 0xff9c47
   },
+  "shield-guard": {
+    type: "shield-guard",
+    name: "Rift Shield Guard",
+    radius: 17,
+    speed: 54,
+    health: 92,
+    contactDamage: 10,
+    rangedCooldown: 4.2,
+    shardDrop: 22,
+    xp: 24,
+    color: 0x7cc7ff
+  },
   boss: {
     type: "boss",
     name: "Apex Harvester",
@@ -71,7 +83,9 @@ export function getEnemySpawnMix(elapsed: number, theme: "skirmish" | "crossfire
     if (elapsed < 300) {
       return ["drone", "sniper", "sniper"];
     }
-    return ["drone", "sniper", "sniper", "brute"];
+    return elapsed > 720
+      ? ["drone", "sniper", "sniper", "brute", "shield-guard"]
+      : ["drone", "sniper", "sniper", "brute"];
   }
 
   if (theme === "siege") {
@@ -81,7 +95,10 @@ export function getEnemySpawnMix(elapsed: number, theme: "skirmish" | "crossfire
     if (elapsed < 300) {
       return ["drone", "brute", "brute"];
     }
-    return ["drone", "sniper", "brute", "brute"];
+    if (elapsed < 600) {
+      return ["drone", "sniper", "brute", "brute", "shield-guard"];
+    }
+    return ["drone", "sniper", "brute", "brute", "shield-guard"];
   }
 
   if (elapsed < 90) {
@@ -92,5 +109,5 @@ export function getEnemySpawnMix(elapsed: number, theme: "skirmish" | "crossfire
     return ["drone", "sniper"];
   }
 
-  return ["drone", "sniper", "brute"];
+  return elapsed > 720 ? ["drone", "sniper", "brute", "shield-guard"] : ["drone", "sniper", "brute"];
 }
